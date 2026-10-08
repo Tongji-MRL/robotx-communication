@@ -25,8 +25,8 @@ Team Village 连接信息和 Orin 任务接口确认后，再接入正式通信�
 
 `vehicle_protocol.py` 定义了 OCS 与两台 Orin 之间的团队内部 JSON/MQTT
 协议。它与官方 RoboCommand 协议分开，车辆不会连接官方 RoboCommand。当前 v1
-只保留 `heartbeat`、`task_report`、`fault`、`command`、`ack` 五类 Topic；不定义
-UAV↔USV 直连 Topic。
+只保留 `heartbeat`、`task_report`、`fault`、`command`、`ack` 五类 Topic。
+UAV↔USV 直连使用另一组独立的 `tongji/robotx/fsm/v1/...` Topic，不经过 OCS。
 
 `vehicle_agent.py` 是放在 Orin 上的适配器骨架；当前只支持安全的模拟心跳，
 不会启动 ROS 2、飞控、水泵或其他硬件：
@@ -35,6 +35,10 @@ UAV↔USV 直连 Topic。
 python3 vehicle_agent.py --vehicle-id T-Sky --broker <internal-broker-ip> --simulate
 python3 vehicle_agent.py --vehicle-id T-Wave --broker <internal-broker-ip> --simulate
 ```
+
+`fsm_protocol.py` 定义 UAV↔USV 状态机的 JSON envelope、Topic、校验和 ACK；
+`fsm_link.py` 提供 MQTT 传输、去重和自动 ACK 骨架。详细格式见
+`../docs/uav_usv_state_machine_link.md`。这两个模块不直接连接 ROS 2 或执行器。
 
 `ocs_client.py` 只把经过校验的 `RunStart` 和官方 Task 4 命令排队给 USV
 任务协调器；不会在 OCS 内判断当前执行哪个任务，也不会直接启动 UAV。
@@ -112,8 +116,11 @@ python .\vehicle_link.py --broker <internal-broker-ip> `
 python -m unittest discover -s . -p "test_*.py"
 ```
 
-后续只需在 Orin 侧把真实 ROS 2 状态转换后调用 `VehicleAgent.publish_report()`，
-并由软件组实现经过安全检查的 `command_handler`。在确认 dry-run、停止/急停、
+当前基线为 23 项单元测试通过。
+
+通信/OCS 负责人维护通用协议、MQTT 骨架、模拟器和测试。UAV 状态机负责人实现 UAV
+生产适配器，USV 状态机负责人实现 USV 生产适配器并接入任务协调器；两边分别把真实
+ROS 2 状态映射到通信模块，并实现经过安全检查的 handler。在确认 dry-run、停止/急停、
 Task 1/3 状态和定位语义前，不要把命令处理器接到真实执行器。详细字段和 ACK
 规则见 `vehicle_link_contract.md`。
 
@@ -160,3 +167,11 @@ python .\task1_status_adapter.py --phase TASK_COMPLETE --vehicle-id T-Wave
 ```powershell
 python .\ocs_bridge.py --config .\config.example.json
 ```
+
+## 当前未完成任务
+
+- 冻结 UAV↔USV 最终 payload、坐标系、状态枚举和任务完成/失败判据。
+- 由 UAV/USV 状态机负责人分别完成生产 ROS 2 适配器。
+- 在 USV-Orin 接入 Task4 抢占、checkpoint 持久化、恢复和 `SAFE_STOP`。
+- 完成电脑 B、电脑 A、UAV-Orin、USV-Orin 四机联调及断线/超时/旧 run 测试。
+- 填写真实 geofence、Broker 和比赛网卡参数；在测试通过前不连接真实执行器。

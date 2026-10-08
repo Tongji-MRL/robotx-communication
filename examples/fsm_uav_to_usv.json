@@ -1,0 +1,21 @@
+{
+  "protocol_version": "1",
+  "message_id": "replace-with-uuid",
+  "sent_at_unix_ms": 0,
+  "run_id": 42,
+  "sequence": 1,
+  "source_vehicle_id": "T-Sky",
+  "target_vehicle_id": "T-Wave",
+  "kind": "event",
+  "task": "TASK1",
+  "message_type": "TASK1_MAP_UPDATE",
+  "correlation_id": null,
+  "payload": {
+    "sample_only": true,
+    "map_version": 1,
+    "frame_id": "wgs84",
+    "entry_position": {"latitude": null, "longitude": null},
+    "exit_position": {"latitude": null, "longitude": null},
+    "buoys": []
+  }
+}

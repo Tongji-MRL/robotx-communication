@@ -1,6 +1,6 @@
 # OCS ⇄ UAV/USV 内部通信协议 v1（草案）
 
-更新时间：2026-10-07
+更新时间：2026-10-08
 
 本协议只定义 OCS 与车辆的必要信息通信，不定义 UAV⇄USV 的任务数据交换。官方
 RoboCommand 仍只连接 OCS；车辆不连接官方 RoboCommand。任务选择、Task4 抢占、
@@ -36,7 +36,8 @@ tongji/robotx/v1/<vehicle_id>
 | `.../ack` | USV/UAV → OCS | 每条 command 后 | QoS 1，不 retain | 对应消息、接受结果和处理状态 |
 
 `<vehicle_id>` 当前为 `T-Sky` 或 `T-Wave`。Topic 中的车辆 ID 必须与 envelope 中的
-`vehicle_id` 一致。不存在 UAV⇄USV 直接 Topic。
+`vehicle_id` 一致。本协议命名空间内不存在 UAV⇄USV 直接 Topic；两车直连使用独立
+`tongji/robotx/fsm/v1/...` 命名空间，见 `../docs/uav_usv_state_machine_link.md`。
 
 ## 3. JSON envelope
 
@@ -76,8 +77,8 @@ tongji/robotx/v1/<vehicle_id>
   "current_task": "TASK1",
   "position": {
     "frame_id": "wgs84",
-    "latitude_deg": 0.0,
-    "longitude_deg": 0.0,
+    "latitude_deg": null,
+    "longitude_deg": null,
     "altitude_m": null
   },
   "speed_mps": null,
@@ -107,8 +108,8 @@ OCS 将其转换为每车独立的官方 `RxReport.Heartbeat`。车辆失联后�
   "authority": "USV",
   "official_report": {
     "type": "safe_passage",
-    "entry_position": {"latitude": 0.0, "longitude": 0.0},
-    "exit_position": {"latitude": 0.0, "longitude": 0.0},
+    "entry_position": {"latitude": null, "longitude": null},
+    "exit_position": {"latitude": null, "longitude": null},
     "buoys": []
   },
   "result": {},

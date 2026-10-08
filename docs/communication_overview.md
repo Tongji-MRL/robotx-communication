@@ -1,7 +1,8 @@
 # RobotX 2026 通信流程与接口总览
 
 更新时间：2026-10-08
-资料依据：RoboNation Handbook 3.4（官网最新页面）、官方 `robonation/robocommand` 的 `RobotX_2026` 目录、团队《任务全流程.pdf》。
+资料依据：RoboNation Handbook 3.4（官网最新页面）、官方 `robonation/robocommand` 的
+`RobotX_2026` 目录、团队 `task_flow.pdf`。
 
 ## 1. 先区分两条通信边界
 
@@ -160,7 +161,10 @@ TASK3_DELIVERY
 TASK3_DONE → 向 OCS 报告任务完成
 ```
 
-UAV 与 USV 直接传输的内容至少包括：Task 1 浮标/门信息、Task 3 dock 粗定位、dock 状态、颜色序列、delivery 目标和完成/失败事件。具体 Topic 和 JSON/ROS 消息仍由软件组定稿。
+UAV 与 USV 直接传输的内容至少包括：Task 1 浮标/门信息、Task 3 dock 粗定位、dock
+状态、颜色序列、delivery 目标和完成/失败事件。参考 Topic、JSON envelope、ACK 和去重
+规则已写入 `uav_usv_state_machine_link.md`；最终 payload 与 ROS 2 映射仍由两车状态机
+负责人共同定稿。
 
 ### 3.3 USV 状态机（按团队任务流程）
 
@@ -238,17 +242,23 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 
 内部消息必须带 `message_id`、`sent_at`、`run_id`、`vehicle_id`、`source` 和 `frame_id`；失联恢复后不能把旧 run 的消息当作新 run 数据。
 
+其中 OCS↔车辆使用 `tongji/robotx/v1/...`；UAV↔USV 状态机直连使用独立的
+`tongji/robotx/fsm/v1/<source>/<target>/<kind>`，不经过 OCS。直连参考实现为
+`OCS/fsm_protocol.py` 和 `OCS/fsm_link.py`，只提供任务级消息传输，不控制执行器。
+
 ## 6. 当前 OCS 项目状态
 
 - 官方 OCS 客户端已能连接、订阅 `RxCourse`/`RxCommand`，构造 `RunDeclaration`、Heartbeat、Task 1 报告。
 - 官方 `RobotX_2026` schema 与 GitHub 最新主分支内容已下载并核对；当前本地 schema 文本与官方快照一致，主要差异只是换行格式。
-- 团队内部 MQTT 模拟链路已验证心跳、ACK、断线恢复；真实 UAV↔USV 任务消息尚未接入。
-- UAV/USV 直接通信的具体消息格式、状态机启动/停止/急停接口仍需软件组确认。
+- 团队内部 MQTT 模拟链路已验证心跳、ACK、断线恢复；UAV↔USV 参考消息格式和
+  通信骨架已完成，真实 ROS 2 状态机尚未接入。
+- UAV/USV 直接通信的最终 payload、坐标系以及状态机启动/停止/急停接口仍需两车
+  状态机负责人确认。
 - OCS 的 `ned_map_transform.py` 不再属于比赛主链路；如继续保留，只作为离线参考和历史资料。
 
 ## 7. 必须补齐的接口清单
 
-1. UAV↔USV 直连的实际传输方式、Topic/端口和消息格式。
+1. 确认 UAV↔USV 直连使用的 Broker/端口，并冻结参考 Topic/envelope 的生产版本。
 2. UAV Task 1 地图/浮标更新和 Task 3 delivery 信息的真实样例。
 3. USV 停泊、喷水、颜色序列和任务完成事件的真实接口。
 4. 两台状态机对 `RUN_START`、`STOP`、`FAULT`、`TASK_COMPLETE` 的状态定义。
@@ -260,7 +270,7 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 
 - 已解压并阅读 Ubuntu 说明、通信总览、开发主线、OCS 合约、Handbook 3.4 快照、官方
   `RobotX_2026` README、`rc_test/test_client.py` 和 `test_server.py`。
-- OCS 本地单元测试从原有 7 项扩展为 18 项，覆盖 retained `RxCourse` 保存与边界校验、
+- OCS 本地单元测试从原有 7 项扩展为 23 项，覆盖 retained `RxCourse` 保存与边界校验、
   RunStart declaration sequence/run ID 校验、每车独立 report sequence、Task 3 报告和旧
   run 隔离；Python 编译和 JSON 检查通过。
 - 官方测试客户端离线构造并解析 14 类 protobuf 消息，Topic 和 envelope 与本地 schema
@@ -293,3 +303,18 @@ Task 4 command 的内部 payload 必须携带官方 `command_seq` 和 `decision_
 所有消息先使用统一 JSON envelope；官方消息仍只在 OCS⇄RoboCommand 边界使用 Protobuf。
 完整字段、payload 和时序见 `OCS/vehicle_link_contract.md`。原始 ROS Topic、传感器流、
 详细规划、UAV⇄USV 地图交换和低层执行器命令不纳入该协议。
+
+## 10. 实现责任边界
+
+| 模块 | 负责人 | 当前状态 |
+|---|---|---|
+| 官方 RoboCommand、OCS 网关、协议/schema、日志和测试 | 通信/OCS 负责人 | 基础实现完成，真实现场参数待填 |
+| 通用车辆 MQTT 骨架与 UAV↔USV 直连骨架 | 通信/OCS 负责人 | 参考实现完成，不连接执行器 |
+| UAV ROS 2 ↔ 团队协议生产适配器 | UAV 状态机负责人 | 未完成 |
+| USV ROS 2 ↔ 团队协议生产适配器 | USV 状态机负责人 | 未完成 |
+| Task4 抢占、checkpoint/恢复和 UAV 协调 | USV 状态机负责人 | 纯 Python 参考决策核已有，真实接入未完成 |
+| 四机端到端、断线和故障验收 | 三方共同完成 | 未完成 |
+
+任何代码接口变化都必须同时更新对应合约、示例、README 和测试。生产适配器由车辆
+状态机负责人编写和维护；通信负责人提供消息骨架、测试用例和联调支持，但不代替车辆
+负责人定义真实 ROS 2 Topic、完成判据或安全动作。

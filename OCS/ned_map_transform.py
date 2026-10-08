@@ -1,7 +1,7 @@
 """Translate the UAV semantic map into the USV local NED frame.
 
 The UAV map is expressed in the UAV launch-point NED frame.  The document
-``UAV建立的地图如何被USV所用.pdf`` specifies that the UAV and USV NED axes
+``uav_map_usv_reference.pdf`` specifies that the UAV and USV NED axes
 are aligned, so the conversion is a translation only::
 
     usv_map_position_ned = uav_map_position_ned + offset_to_add_m
