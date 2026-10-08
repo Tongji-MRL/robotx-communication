@@ -1,6 +1,6 @@
 # RobotX 2026 通信流程与接口总览
 
-更新时间：2026-10-06
+更新时间：2026-10-08
 资料依据：RoboNation Handbook 3.4（官网最新页面）、官方 `robonation/robocommand` 的 `RobotX_2026` 目录、团队《任务全流程.pdf》。
 
 ## 1. 先区分两条通信边界
@@ -97,7 +97,7 @@ OCS 收到 `RunStart` 后必须检查：
 
 - `declaration_seq` 是否等于 OCS 刚刚发送的声明序号；
 - 保存官方分配的 `run_id`；
-- 只有通过检查后，才向 UAV/USV 内部状态机发送 `RUN_START` 或 `MISSION_ENABLE`。
+- 只有通过检查后，才向 USV 任务协调器发送 `RUN_START`；USV 再决定如何启动/协调 UAV。
 
 在收到并验证 RunStart 之前，两台车应保持自主模式下的位置保持，不应开始任务动作。
 
@@ -109,7 +109,7 @@ OCS 收到 `RunStart` 后必须检查：
 2. `KeepOutZone`：指定危险区域、半径和受影响车辆类型；车辆 ACK 并避开。
 3. `AllClear`：解除指定车辆类型的避让状态；车辆 ACK。
 4. `MovingObjectAlert`：提供移动目标位置、航向、速度和受影响车辆类型；没有单独 ACK/AllClear 链。
-5. `ReadinessConfirm`：OCS 收到 `ReadinessReport` 后由官方发回确认，OCS 再路由给对应车辆。
+5. `ReadinessConfirm`：OCS 收到 `ReadinessReport` 后由官方发回确认，OCS 再路由给 USV；USV 决定对应车辆的恢复动作。
 
 ## 3. 团队内部通信：UAV ↔ USV ↔ OCS
 
@@ -125,12 +125,12 @@ DECLARED
 WAIT_RUN_START
   ↓ 校验 RunStart.declaration_seq，保存 run_id
 RUN_ENABLED
-  ↓ 向 UAV/USV FSM 发 RUN_START
+  ↓ 向 USV 任务协调器发 RUN_START
 MISSION_RUNNING
-  ├─ 收集 UAV/USV 状态并发布官方 Heartbeat/TaskReport
-  ├─ 收到官方 Task 4 指令 → 路由给目标车辆并跟踪 ACK
+  ├─ 收集 UAV/USV 状态并发布官方 Heartbeat/明确提供的 TaskReport
+  ├─ 收到官方 Task 4 指令 → 路由给 USV 并跟踪 ACK/Readiness
   ├─ 车辆失联/故障 → 上报状态、停止使用旧状态伪造心跳
-  └─ 收到任务完成 → 记录报告序号和完成状态
+  └─ 收到 USV 的 authoritative official_report → 转换并发布官方报告
 MISSION_COMPLETE / SAFE_STOP / FAULT
 ```
 
@@ -226,14 +226,14 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 
 | 消息 | 方向 | 必须包含 |
 |---|---|---|
-| `RUN_START` / `RUN_STOP` | OCS → UAV/USV | `run_id`、官方序号、时间戳 |
+| `RUN_START` / `RUN_STOP` | OCS → USV | `run_id`、官方序号、时间戳 |
 | `vehicle_heartbeat` | UAV/USV → OCS | 在线、模式、当前任务、位置、故障、时间戳 |
 | `task1_map_update` | UAV → USV | 浮标/门位置、坐标系声明、版本号、时间戳 |
 | `task1_state` | USV → UAV/OCS | 阶段、当前门、通过门序号、故障/恢复原因 |
 | `dock_state` | USV → UAV/OCS | dock ID、入口方向、停泊状态、喷水状态 |
 | `delivery_request` | USV → UAV | tin/circle 颜色、目标位置、有效期、版本号 |
 | `delivery_state` | UAV → USV/OCS | 起飞、搜索、抓取、释放、成功/失败原因 |
-| `task_report` | UAV/USV → OCS | 任务完成/失败、事件时间、证据字段 |
+| `task_report` | UAV/USV → OCS | 任务阶段、完成/失败、事件时间、证据；USV 汇总时带 `official_report` |
 | `ACK` | 接收方 → 发送方 | 原消息 ID、接受/拒绝、原因 |
 
 内部消息必须带 `message_id`、`sent_at`、`run_id`、`vehicle_id`、`source` 和 `frame_id`；失联恢复后不能把旧 run 的消息当作新 run 数据。
@@ -252,7 +252,7 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 2. UAV Task 1 地图/浮标更新和 Task 3 delivery 信息的真实样例。
 3. USV 停泊、喷水、颜色序列和任务完成事件的真实接口。
 4. 两台状态机对 `RUN_START`、`STOP`、`FAULT`、`TASK_COMPLETE` 的状态定义。
-5. OCS 如何安全地向两台状态机发送开始/停止/Task 4 优先级指令。
+5. OCS 如何安全地向 USV 任务协调器发送开始/停止/Task 4 官方事件，以及 USV 如何协调 UAV。
 6. 最终 Team ID、vehicle ID、任务等级和比赛现场 RoboCommand 连接参数。
 7. 官方最新 schema 变更后的全量本地测试：RunDeclaration、RunStart、2 Hz Heartbeat、Task 1/3 报告、Task 4 ACK/Readiness、重连和旧 run 隔离。
 
@@ -260,7 +260,7 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 
 - 已解压并阅读 Ubuntu 说明、通信总览、开发主线、OCS 合约、Handbook 3.4 快照、官方
   `RobotX_2026` README、`rc_test/test_client.py` 和 `test_server.py`。
-- OCS 本地单元测试从原有 7 项扩展为 12 项，覆盖 retained `RxCourse` 保存与边界校验、
+- OCS 本地单元测试从原有 7 项扩展为 18 项，覆盖 retained `RxCourse` 保存与边界校验、
   RunStart declaration sequence/run ID 校验、每车独立 report sequence、Task 3 报告和旧
   run 隔离；Python 编译和 JSON 检查通过。
 - 官方测试客户端离线构造并解析 14 类 protobuf 消息，Topic 和 envelope 与本地 schema
@@ -272,7 +272,7 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 - 包内未发现实际 UAV/USV ROS 2 工程、运行节点或 `ros2 topic list -t` 输出；现有 Topic
   名称和字段仍属于待软件组实测确认项。未启动 ROS 2、PX4 或任何执行器。
 
-## 9. OCS ⇄ UAV/USV 内部协议 v1（2026-10-07）
+## 9. OCS ⇄ UAV/USV 内部协议 v1（2026-10-08）
 
 当前先不把 UAV⇄USV 直连任务数据纳入 OCS 协议，只保留 OCS 与车辆之间的最小闭环。
 Task 4 作为 USV 任务协调器的最高优先级：在 Task 1/3 中途收到官方 Task 4 指令时，
@@ -283,7 +283,7 @@ OCS 转发给 USV，由 USV 保存断点、抢占车辆、完成 Task 4 官方�
 | `tongji/robotx/v1/<vehicle_id>/heartbeat` | 车辆 → OCS | 车辆状态、任务、位置、健康和故障 |
 | `tongji/robotx/v1/<vehicle_id>/task_report` | 车辆 → OCS | 官方 Task 1/3 所需结果 |
 | `tongji/robotx/v1/<vehicle_id>/fault` | 车辆 → OCS | 故障、严重度、影响和恢复状态 |
-| `tongji/robotx/v1/<vehicle_id>/command` | OCS → 车辆 | `RUN_START`、`SAFE_STOP`、Task 4 高层指令 |
+| `tongji/robotx/v1/<vehicle_id>/command` | OCS → USV | `RUN_START`、`SAFE_STOP`、转发给 USV 的 Task 4 官方事件 |
 | `tongji/robotx/v1/<vehicle_id>/ack` | 车辆 → OCS | 对 command 的接受结果和处理状态 |
 
 Task 4 command 的内部 payload 必须携带官方 `command_seq` 和 `decision_owner=USV`；
