@@ -27,6 +27,7 @@
 - `OCS/vehicle_protocol.py`：内部 JSON envelope、Topic 和命令格式。
 - `OCS/vehicle_agent.py`：Orin-LQ 侧安全模拟器/适配器骨架。
 - `OCS/task_priority_manager.py`：USV 任务协调器的参考状态机，不由 OCS 调用。
+- `docs/usv_task_coordinator_deployment.md`：参考状态机在 USV-Orin 上的部署边界和适配清单。
 - `OCS/vehicle_link_contract.md`：内部协议正式草案。
 - `docs/`：架构、通信总览和开发主线。
 - `examples/`：可用于联调的 JSON 示例。

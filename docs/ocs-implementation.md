@@ -47,6 +47,10 @@ python3 vehicle_agent.py --vehicle-id T-Wave --broker <internal-broker-ip> --sim
 `task_priority_manager.py` 现在只是 USV 任务协调器的参考状态机，不被 OCS
 客户端调用；真正接入时应放入 USV 的任务管理节点。
 
+它目前是可测试的纯 Python 决策核心，不是可直接控制真实车辆的完整程序。部署边界、
+JSON 输入适配、ROS 2 输出适配、checkpoint 持久化和安全互锁要求见
+`docs/usv_task_coordinator_deployment.md`。
+
 车辆命令动作可由内部适配器发送：
 
 ```python
