@@ -254,14 +254,18 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
   通信骨架已完成，真实 ROS 2 状态机尚未接入。
 - UAV/USV 直接通信的最终 payload、坐标系以及状态机启动/停止/急停接口仍需两车
   状态机负责人确认。
+- USV-Orin 的源码级 Topic 已盘点，见 `usv_ros2_interfaces.md`；当前任务节点未在线，
+  `RUN_START`、正式 ACK、Task4 checkpoint/恢复和整船 `SAFE_STOP` 尚未实现。
 - OCS 的 `ned_map_transform.py` 不再属于比赛主链路；如继续保留，只作为离线参考和历史资料。
 
 ## 7. 必须补齐的接口清单
 
 1. 确认 UAV↔USV 直连使用的 Broker/端口，并冻结参考 Topic/envelope 的生产版本。
 2. UAV Task 1 地图/浮标更新和 Task 3 delivery 信息的真实样例。
-3. USV 停泊、喷水、颜色序列和任务完成事件的真实接口。
-4. 两台状态机对 `RUN_START`、`STOP`、`FAULT`、`TASK_COMPLETE` 的状态定义。
+3. USV 状态机负责人根据 `usv_ros2_interfaces.md` 补齐停泊、喷水、window ID、颜色请求
+   和 authoritative 任务完成事件。
+4. USV 状态机负责人补齐 `RUN_START`、正式 ACK、Task4 checkpoint/恢复和整船
+   `SAFE_STOP`；UAV 负责人补齐对应 UAV 状态定义。
 5. OCS 如何安全地向 USV 任务协调器发送开始/停止/Task 4 官方事件，以及 USV 如何协调 UAV。
 6. 最终 Team ID、vehicle ID、任务等级和比赛现场 RoboCommand 连接参数。
 7. 官方最新 schema 变更后的全量本地测试：RunDeclaration、RunStart、2 Hz Heartbeat、Task 1/3 报告、Task 4 ACK/Readiness、重连和旧 run 隔离。

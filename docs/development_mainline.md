@@ -85,20 +85,26 @@ USV ROS 2 ─ USV 状态机 ───────┘       └─ 官方报告/�
 
 - [ ] UAV Task 1：感知结果、任务状态、入口/出口/完成判定。
 - [ ] UAV Task 3：感知状态、检测结果、事件、任务完成和失败状态。
-- [ ] USV Task 1：`/task1/beacons/results_json`、`/safe_passage/mission_state` 的最终运行接口。
-- [ ] USV Task 3：感知输出与执行器输入之间的最终映射。
+- [~] USV ROS 2 源码级接口已盘点，见 `usv_ros2_interfaces.md`；审计时工作区 overlay
+  未加载且任务节点未在线，尚无真实运行样例。
+- [ ] USV Task 1：`/safe_passage/mission_state` 只是独立原型；入口、出口、浮标/门结果和
+  authoritative 完成事件仍由 USV 状态机负责人补齐。
+- [ ] USV Task 3：已记录 dock、alignment、window、颜色请求和泵候选 Topic；靠泊完成、
+  window ID、喷水完成及执行闭环仍由 USV 状态机负责人补齐。
 - [~] 两台车的 GPS、位置、速度、航向和姿态来源及坐标系；团队的设计约定是 UAV/USV 两套 NED 轴方向一致，原点分别为 UAV 开始建图位置、USV 开始任务位置，因此地图转换无需旋转；但 USV 当前源码仍使用配置参考点，尚未实现/验证任务启动时抓取原点。
 - [x] 阅读地图资料并实现 WGS84 GPS 原点差到 NED 平移的 OCS 离线参考模块；当前不接入比赛主链路。
 - [ ] 确认 UAV/USV 直连任务数据的真实格式；坐标数据由车辆侧直接约定和使用，不再由 OCS 转换。
 - [ ] 两台车的心跳、飞控连接、传感器健康和失联状态。
-- [ ] 任务启动、暂停、恢复、停止、取消、急停和返航接口。
+- [ ] USV 状态机负责人补齐 `RUN_START`、正式 ACK、Task4 checkpoint/恢复、整船
+  `SAFE_STOP`；UAV 对应接口仍待盘点。
 - [ ] `KILLED`、`MANUAL`、`AUTO` 与内部 ROS 2 状态的映射。
 - [ ] UAV `DOCKED/完成`、USV 靠泊完成和真实水泵完成的判定。
 - [ ] 明确哪些接口只能 OCS 观察，哪些允许 OCS 发送。
 
-当前审计证据：UAV 的 `/visual_test/supply_can_detections` 只在感知测试中找到，
-没有输入图像时不会产生样例；USV 的 `/tongji_mrl/twave/task_cmd` 等接口只在配置中找到，
-尚未有运行节点。USV 的 `dry_run` 配置存在冲突，未确认前禁止启动状态机。
+当前审计证据：UAV 的 `/visual_test/supply_can_detections` 只在感知测试中找到，没有输入
+图像时不会产生样例。USV 源码定义了 `/tongji_mrl/twave/task_cmd`、`state`、`heartbeat`
+和 `task_report`，但审计时只有相机相关节点在线；Task1/Task4 是 placeholder，Task3 控制
+闭环未完成。完整证据和责任边界见 `usv_ros2_interfaces.md`。
 
 ## E. Task 1/3 数据转换
 
@@ -167,10 +173,13 @@ USV ROS 2 ─ USV 状态机 ───────┘       └─ 官方报告/�
 
 ## 当前阻塞/待确认
 
-1. UAV、USV 最终任务启动与停止接口尚未由软件组确认。
+1. UAV 最终接口尚未盘点；USV 源码级 Topic 已盘点，但 `RUN_START`、正式 ACK、
+   checkpoint/恢复和整船 `SAFE_STOP` 仍由 USV 状态机负责人补齐。
 2. UAV Task 3 和 USV Task 3 的感知输出、执行器输入存在命名/类型不一致。
-3. USV 的 dry-run 配置冲突，需要确认安全启动入口。
-4. 两台 Orin 当前审计时没有业务节点运行，尚未取得真实状态样例；Ubuntu 交接包内也没有 UAV/USV ROS 2 工程或 `ros2 topic list -t` 输出。
+3. USV 审计时工作区 overlay 未加载、业务节点未运行；已有默认 dry-run 启动说明，但仍需
+   状态机负责人确认安全启动入口并提供真实 Topic 样例。
+4. 尚未取得两台 Orin 的权威车辆状态样例；USV 原始 ROS 图清单保留在远端，仓库只记录
+   已脱敏的接口结论。
 5. 当前环境没有 Docker、Mosquitto 或可用系统 `python3-venv`；依赖已安装到交接包本地环境目录，未能启动 broker 端到端回归。
 6. Team Village 正式 Broker 地址、比赛网卡和最终课程流程尚未实测。
 7. UAV↔USV 参考 Topic/envelope 已完成，但最终 payload 以及两台状态机的

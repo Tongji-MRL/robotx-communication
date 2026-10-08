@@ -41,6 +41,10 @@ OCS command envelope
 
 ## USV-Orin 必须补齐的四个接口
 
+USV-Orin 的源码级 Topic、类型、当前可用程度和缺口已记录在
+`usv_ros2_interfaces.md`。以下内容是状态机负责人必须实现的契约，不是通信/OCS
+负责人需要代写的车辆逻辑。
+
 ### 1. 命令入口
 
 订阅：
@@ -83,7 +87,9 @@ USV 任务协调器需要持续获得：
 - Task4 完成后恢复原 Task1/Task3 checkpoint；
 - SAFE_STOP/急停覆盖所有普通任务。
 
-实际 ROS 2 topic、service 或 action 名称需要由 USV 软件组提供后再填写。
+当前源码已有 `/tongji_mrl/twave/task_cmd`，但只接受 `task_id` 与有限的 `action`；
+尚不支持正式 `RUN_START`、`SAFE_STOP`、带 checkpoint 的恢复或 Task4 完整参数。
+这些 ROS 2 契约及其安全行为由 USV 状态机负责人补齐。
 
 ### 4. OCS 回报出口
 
@@ -109,3 +115,13 @@ OCS 只把 `official_report` 转成官方 Protobuf，不根据单独的 `phase=C
 在完成上述适配前，`task_priority_manager.py` 的定位是“可测试的决策核心”，不是
 “可直接控制车辆的完整程序”。
 
+## 已确认的现状
+
+- `/tongji_mrl/twave/state`、`heartbeat`、`task_report` 和 `task_cmd` 已在源码中定义，
+  但审计时任务节点没有在线；
+- Task1/Task4 executor 仍为 placeholder，Task3 的 docking、泵、PX4 等闭环仍有 TODO；
+- 现有 `task_report` 不是带 `command_seq` 的正式 ACK；
+- 没有 checkpoint 持久化、可靠恢复或整船 `SAFE_STOP`；
+- `/fix`、NED、感知和泵 Topic 只能作为候选数据源，不能直接当作权威任务完成事件。
+
+因此通信适配器只能在状态机负责人冻结接口后实现字段转换，不能自行补出任务完成条件。
