@@ -1,0 +1,23 @@
+{
+  "protocol_version": "1",
+  "message_id": "replace-with-uuid",
+  "sent_at_unix_ms": 0,
+  "run_id": 42,
+  "source": "ocs",
+  "vehicle_id": "T-Wave",
+  "frame_id": "wgs84",
+  "kind": "command",
+  "payload": {
+    "command": "task4_assistance",
+    "command_seq": 12,
+    "priority": "OFFICIAL",
+    "preempt": false,
+    "parameters": {
+      "official_command_seq": 12,
+      "official_body": "assistance_request",
+      "decision_owner": "USV",
+      "position": {"latitude": 1.2805, "longitude": 103.8558},
+      "vehicle_type": 1
+    }
+  }
+}

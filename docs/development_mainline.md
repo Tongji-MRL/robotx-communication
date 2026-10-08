@@ -1,0 +1,171 @@
+# RobotX 2026 OCS 程序开发主线
+
+更新时间：2026-10-06
+
+这份文档是 OCS 开发的唯一进度主线。完成一项后，把对应 `[ ]` 改成 `[x]`；
+部分完成使用 `[~]`，并在“当前阻塞/待确认”中补充证据。以后新增工作应归入下面某个阶段，
+不要脱离主线直接接真实执行器。
+
+## 总体数据路径
+
+```text
+UAV ROS 2 ─ UAV 状态机 ───────┐       ┌─ 官方 MQTT/Protobuf ─ RoboNation RoboCommand
+                              ├─ OCS ─┤
+USV ROS 2 ─ USV 状态机 ───────┘       └─ 官方报告/命令/日志
+       └──────── UAV ↔ USV 团队内部直连任务数据 ───────┘
+```
+
+官方边界只在 OCS：UAV、USV 不直接连接官方 RoboCommand。USV 是任务协调器，负责
+选择当前 task、Task4 抢占、协调 UAV 和恢复；OCS 只负责官方通信、RunStart 校验、
+消息转发、官方报告格式转换和日志。OCS 不直接控制 PX4、推进器、水泵、云台或夹爪。
+
+## 当前状态总览
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| A. 目录和资料归档 | [x] | 已分离电脑 A 测试记录与 OCS 项目，并完成 Ubuntu 交接包 |
+| B. 官方 RoboCommand 客户端 | [~] | 连接、订阅、声明、心跳和部分 Task 1 构造已完成；正式运行校验仍未完成 |
+| C. 团队内部车辆通信协议 | [~] | 电脑 A 的 JSON/MQTT 模拟链路已有；比赛主链路改为 UAV↔USV 直连，真实消息格式尚未定稿 |
+| D. UAV/USV ROS 2 适配器 | [~] | 任务状态机接口、UAV↔USV 直连消息和 OCS 状态订阅仍待软件组确认；坐标转换不再作为主链路 |
+| E. Task 1/3 官方报告转换 | [ ] | Task 1 有离线原型，Task 3 尚未完成真实报告适配；地图坐标转换已作为独立前置模块完成 |
+| F. 自动化和故障测试 | [ ] | 需要补 RunStart、重连、畸形消息和序号测试 |
+| G. 真实硬件联调 | [ ] | 必须先完成 D/E，并在 dry-run 或仿真中通过 |
+| H. 比赛现场运行流程 | [ ] | 依赖 Team Village 连接信息和全部接口验收 |
+
+## A. 资料与身份
+
+- [x] 固定 Team ID：`TONG`。
+- [x] 当前团队车辆 ID：UAV=`T-Sky`、USV=`T-Wave`。
+- [x] 归档官方 schema、生成代码、Docker Broker 和 rc-test。
+- [x] 下载并核对 2026-10-06 官网 Handbook 关键页和官方 RoboCommand 主分支快照；通信总览见 `通信流程与接口总览_20261006.md`。
+- [x] 归档电脑 A 的 Mesh、Ping、MQTT、RoboCommand 测试资料。
+- [ ] 比赛前确认 RoboNation/现场最终 vehicle ID 是否仍使用当前声明。
+- [x] 确认 Task 4 参赛，按 `DISRUPTIVE` 级别纳入声明和优先级调度。
+
+## B. 官方 RoboCommand OCS 客户端
+
+- [x] 连接官方 MQTT Broker 的基础客户端。
+- [x] 订阅 `robocommand/robotx/course`。
+- [x] 订阅 `robocommand/robotx/TONG/command`。
+- [x] 构造并发布 `RunDeclaration`。
+- [x] 构造官方 Heartbeat 和 Task 1 SafePassageReport 的初版函数。
+- [x] 按最新版 Handbook 核对官方 topic、envelope、2 Hz Heartbeat、RunStart 和 Task 4 指令链。
+- [x] 对 Team ID、vehicle ID、枚举、经纬度和闭合 geofence 做基础校验。
+- [x] 从 retained `RxCourse` 读取并保存课程信息（已增加闭合边界校验；尚未接真实 broker）。
+- [x] 收到 `RunStart` 后校验 declaration sequence，并保存 `run_id`（已增加单元测试；尚未接真实 broker）。
+- [ ] 让两台参与车辆各自以 2 Hz 发布真实 Heartbeat。
+- [~] 让每辆车的官方 report sequence 在重连后继续单调递增（进程内保持；持久化/真实重连仍待验证）。
+- [~] 增加可靠重连、恢复订阅、发布失败处理和结构化日志（Paho 自动重连与订阅恢复已配置；真实 broker 验证未完成）。
+- [x] 接入官方 Task 3 `DockingReport`、`FirefightingReport`、`ResourceDeliveryRequest` 的构造函数。
+- [x] 接入官方 Task 4 `IncidentAck`、`ReadinessReport` 的构造函数；真实命令路由仍未接入。
+
+## C. 团队内部车辆通信
+
+- [x] 定义版本化 JSON/MQTT envelope、Topic 和 ACK 格式；已补齐 `run_id`、`source`、`frame_id`、ACK 超时和旧 run 规则。
+- [x] 完成 `vehicle_agent.py` 模拟心跳骨架。
+- [x] 完成 OCS 侧 `vehicle_link.py` 观察和测试命令工具。
+- [x] 完成协议单元测试。
+- [x] 在电脑 A Broker 上安装依赖并运行 T-Sky/T-Wave 两个模拟 Agent。
+- [~] 已验证两台模拟 Agent 心跳、OCS 同时监听、`ping` 命令 ACK、T-Wave 停止后重新启动并重新入网，以及 Broker stop/start 后 Agent 自动恢复；消息格式错误仍待测试。监听器现已补充断开事件日志。
+- [x] 定义 OCS⇄UAV/USV 内部协议 v1：`heartbeat`、`task_report`、`fault`、`command`、`ack` 五类 Topic 和统一 JSON envelope。
+- [x] 约定 Task 4 为 USV 任务协调器的最高优先级；OCS 只转发官方命令，USV 保存 Task 1/3 断点并完成抢占/恢复。
+- [ ] UAV↔USV 直连的 Task 1/Task 3 消息暂不纳入当前 OCS 协议，待另行定义。
+- [ ] 确认正式比赛内部 Broker 地址、网卡和端口。
+- [ ] 把模拟 payload 与真实 ROS 2 payload 严格分离，禁止模拟数据进入生产默认路径。
+
+## D. ROS 2 适配器接口确认
+
+每一项必须拿到：完整名称、消息类型、方向、真实消息样例、频率、QoS、启动命令、
+停止方式和安全说明。
+
+- [ ] UAV Task 1：感知结果、任务状态、入口/出口/完成判定。
+- [ ] UAV Task 3：感知状态、检测结果、事件、任务完成和失败状态。
+- [ ] USV Task 1：`/task1/beacons/results_json`、`/safe_passage/mission_state` 的最终运行接口。
+- [ ] USV Task 3：感知输出与执行器输入之间的最终映射。
+- [~] 两台车的 GPS、位置、速度、航向和姿态来源及坐标系；团队的设计约定是 UAV/USV 两套 NED 轴方向一致，原点分别为 UAV 开始建图位置、USV 开始任务位置，因此地图转换无需旋转；但 USV 当前源码仍使用配置参考点，尚未实现/验证任务启动时抓取原点。
+- [x] 阅读地图资料并实现 WGS84 GPS 原点差到 NED 平移的 OCS 离线参考模块；当前不接入比赛主链路。
+- [ ] 确认 UAV/USV 直连任务数据的真实格式；坐标数据由车辆侧直接约定和使用，不再由 OCS 转换。
+- [ ] 两台车的心跳、飞控连接、传感器健康和失联状态。
+- [ ] 任务启动、暂停、恢复、停止、取消、急停和返航接口。
+- [ ] `KILLED`、`MANUAL`、`AUTO` 与内部 ROS 2 状态的映射。
+- [ ] UAV `DOCKED/完成`、USV 靠泊完成和真实水泵完成的判定。
+- [ ] 明确哪些接口只能 OCS 观察，哪些允许 OCS 发送。
+
+当前审计证据：UAV 的 `/visual_test/supply_can_detections` 只在感知测试中找到，
+没有输入图像时不会产生样例；USV 的 `/tongji_mrl/twave/task_cmd` 等接口只在配置中找到，
+尚未有运行节点。USV 的 `dry_run` 配置存在冲突，未确认前禁止启动状态机。
+
+## E. Task 1/3 数据转换
+
+- [~] Task 1 状态离线映射：已支持 `RUNNING/RECOVERY/COMPLETE/FAULT` 原型。
+- [ ] 将真实 Task 1 感知和 MissionState 转换为官方 `SafePassageReport`。
+- [ ] 将真实 UAV Task 3 状态转换为官方 Task 3 报告。
+- [ ] 将真实 USV Task 3 状态转换为官方 Task 3 报告。
+- [ ] 明确每个报告的触发条件、序号、时间戳和重复发送策略。
+- [ ] 任何缺少可靠来源的经纬度、速度、状态不得用 0 或模拟值冒充。
+
+## F. 自动化验证
+
+- [x] Python 语法检查和基础协议单元测试（当前 12 项通过）。
+- [~] 官方 schema 离线消息回归（14 类消息可构造/解析；真实 Mosquitto/test server 未运行，当前环境缺 Docker/Mosquitto）。
+- [ ] 官方本地 Broker/test server 启动测试。
+- [ ] 正确收到 retained `RxCourse`。
+- [ ] 正确收到 `RunDeclaration`，任务等级和车辆 ID 正确。
+- [ ] 模拟 `RunStart`：匹配 declaration sequence 才允许进入运行状态。
+- [ ] 两台车 2 Hz Heartbeat 至少 30 秒，序号独立递增。
+- [ ] Task 1/3 模拟报告被官方测试服务正确解码。
+- [ ] Broker 临时停止后自动重连并恢复序号。
+- [ ] 错误 Team ID、错误 vehicle ID、错误 sequence、畸形 JSON/Protobuf 不执行任务。
+- [ ] 生成一次测试摘要和可复核日志包。
+
+## G. 真实硬件联调
+
+- [ ] 先在仿真或明确 `dry_run` 下启动 UAV/USV 节点。
+- [ ] 只读验证 ROS 2 状态和遥测能到 OCS。
+- [ ] 验证 start/pause/stop/急停命令的 ACK 和超时行为。
+- [ ] 验证断开 LQ、重启 Agent、重启 Orin 后自动恢复。
+- [ ] 验证 OCS 不会直接发布 PX4、推进器、水泵、云台或夹爪底层命令。
+- [ ] 真实测试前保存节点列表、Topic 样例、配置、日志和停止方法。
+
+## H. 最终测试/比赛发送接收流程
+
+### 启动阶段
+
+1. 接入电脑 A 的官方比赛网卡，按 Team Village 要求使用 DHCP。
+2. 接通内部 LQ Mesh 和两台 Orin，确认内部地址和 Broker 可达。
+3. 在两台 Orin 启动车辆状态机和 UAV↔USV 直连适配器。
+4. 在 OCS 启动车辆状态监听，确认 T-Sky、T-Wave 心跳和状态。
+5. 启动 OCS 官方 RoboCommand 客户端，连接官方 Broker。
+
+### 声明与开始
+
+1. OCS 接收并保存 retained `RxCourse`。
+2. OCS 校验课程边界和 UAV geofence。
+3. OCS 发布 `RunDeclaration`，包含 T-Sky、T-Wave 和任务等级。
+4. OCS 接收 `RunStart`，校验 declaration sequence 并保存 `run_id`。
+5. OCS 向两台状态机发送团队定义的 `RUN_START/MISSION_ENABLE`，等待两车 ACK。
+
+### 运行阶段
+
+1. UAV 与 USV 通过团队直连交换任务数据；两台 Orin 向 OCS 上报心跳、遥测、状态和任务报告。
+2. OCS 把真实状态转换为官方 2 Hz Heartbeat 和 Task 1/3 报告。
+3. OCS 显示两车在线、当前任务、最近消息、序号、错误和 run ID。
+4. 收到官方控制命令或本地安全操作时，先校验权限、vehicle ID 和 run ID，再转发内部命令。
+5. 任何失联、超时或故障都进入安全状态，并记录事件；不得用旧数据继续伪造心跳。
+
+### 结束阶段
+
+1. 等待任务完成或收到停止/急停指令。
+2. 记录最终任务状态和官方报告序号。
+3. 停止内部 Agent 和 OCS，保留官方与内部双侧日志。
+4. 导出本次运行的日志包、配置、Topic 样例和错误摘要。
+
+## 当前阻塞/待确认
+
+1. UAV、USV 最终任务启动与停止接口尚未由软件组确认。
+2. UAV Task 3 和 USV Task 3 的感知输出、执行器输入存在命名/类型不一致。
+3. USV 的 dry-run 配置冲突，需要确认安全启动入口。
+4. 两台 Orin 当前审计时没有业务节点运行，尚未取得真实状态样例；Ubuntu 交接包内也没有 UAV/USV ROS 2 工程或 `ros2 topic list -t` 输出。
+5. 当前环境没有 Docker、Mosquitto 或可用系统 `python3-venv`；依赖已安装到交接包本地环境目录，未能启动 broker 端到端回归。
+6. Team Village 正式 Broker 地址、比赛网卡和最终课程流程尚未实测。
+7. UAV↔USV 直连消息和两台状态机的 `RUN_START/STOP/FAULT/COMPLETE` 接口尚未定稿；坐标转换不再由 OCS 负责。

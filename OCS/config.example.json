@@ -1,0 +1,64 @@
+{
+  "team_id": "TONG",
+  "mission_coordinator": "T-Wave",
+  "internal_broker": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "purpose": "local_vehicle_network_test_only"
+  },
+  "robocommand": {
+    "port": 1883,
+    "interface_mode": "DHCP",
+    "course_hosts": {
+      "alpha": "COURSE_HOST_ALPHA",
+      "bravo": "COURSE_HOST_BRAVO",
+      "charlie": "COURSE_HOST_CHARLIE",
+      "delta": "COURSE_HOST_DELTA"
+    },
+    "team_village_host": "TBD_FROM_DEMO_CONNECTION_INSTRUCTIONS"
+  },
+  "vehicles": {
+    "uav": {
+      "vehicle_id": "T-Sky",
+      "internal_label": "T-Sky",
+      "orin_ip": "UAV_ORIN_IP"
+    },
+    "usv": {
+      "vehicle_id": "T-Wave",
+      "internal_label": "T-Wave",
+      "orin_ip": "USV_ORIN_IP"
+    }
+  },
+  "run_declaration": {
+    "task_tiers": {
+      "task1": "disruptive",
+      "task2": "none",
+      "task3": "disruptive",
+      "task4": "disruptive"
+    },
+    "uav_geofence": [],
+    "note": "Task 4 is included as DISRUPTIVE. Fill the closed UAV geofence from the received RxCourse before an official run."
+  },
+  "task1": {
+    "status_topic": "/safe_passage/mission_state",
+    "beacons_topic": "/task1/beacons/results_json",
+    "buoys_topic": "/safe_passage/buoys",
+    "forward_plan_topic": "/safe_passage/forward_plan",
+    "start_command_topic": "TBD",
+    "bridge_transport": "TBD"
+  },
+  "map_transform": {
+    "input_frame": "uav_ned",
+    "output_frame": "usv_ned",
+    "uav_mapping_start_topic": "uav/mapping_start",
+    "uav_semantic_map_topic": "/task/semantic_map",
+    "gps_source_topics": [
+      "/fmu/out/vehicle_gps_position",
+      "/fix"
+    ],
+    "normalized_gps_source": "TBD_FROM_ORIN_ADAPTER",
+    "altitude_reference": "WGS84_ellipsoid_m",
+    "translation_only": true,
+    "note": "The Orin adapters must normalize these ROS topics before the OCS uses ned_map_transform.py. Both NED axes must be aligned."
+  }
+}
