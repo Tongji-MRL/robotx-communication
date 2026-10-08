@@ -256,12 +256,15 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
   状态机负责人确认。
 - USV-Orin 的源码级 Topic 已盘点，见 `usv_ros2_interfaces.md`；当前任务节点未在线，
   `RUN_START`、正式 ACK、Task4 checkpoint/恢复和整船 `SAFE_STOP` 尚未实现。
+- UAV-Orin 的源码级 Topic 已盘点，见 `uav_ros2_interfaces.md`；当前没有 PX4/任务节点
+  在线，Task1/3 仅有不完整候选或实验接口，通用任务命令、正式 ACK 和安全接口缺失。
 - OCS 的 `ned_map_transform.py` 不再属于比赛主链路；如继续保留，只作为离线参考和历史资料。
 
 ## 7. 必须补齐的接口清单
 
 1. 确认 UAV↔USV 直连使用的 Broker/端口，并冻结参考 Topic/envelope 的生产版本。
-2. UAV Task 1 地图/浮标更新和 Task 3 delivery 信息的真实样例。
+2. UAV 状态机负责人根据 `uav_ros2_interfaces.md` 补齐 Task1 地图/入口/出口/浮标结果、
+   Task3 delivery 状态、通用命令/ACK、统一车辆状态和安全接口。
 3. USV 状态机负责人根据 `usv_ros2_interfaces.md` 补齐停泊、喷水、window ID、颜色请求
    和 authoritative 任务完成事件。
 4. USV 状态机负责人补齐 `RUN_START`、正式 ACK、Task4 checkpoint/恢复和整船

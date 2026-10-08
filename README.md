@@ -31,6 +31,7 @@
 - `OCS/task_priority_manager.py`：USV 任务协调器的参考状态机，不由 OCS 调用。
 - `docs/usv_task_coordinator_deployment.md`：参考状态机在 USV-Orin 上的部署边界和适配清单。
 - `docs/usv_ros2_interfaces.md`：USV-Orin 已发现 Topic、可用程度、缺口和交付验收条件。
+- `docs/uav_ros2_interfaces.md`：UAV-Orin 已发现 Topic、PX4/任务候选接口、缺口和验收条件。
 - `docs/uav_usv_state_machine_link.md`：UAV↔USV Topic、消息格式、ACK 和责任边界。
 - `OCS/vehicle_link_contract.md`：内部协议正式草案。
 - `docs/communication_overview.md`：当前通信架构和官方/内部接口总览。
@@ -74,8 +75,9 @@ python3 ocs_gateway.py \
 
 ## 当前未完成任务
 
-- USV 已完成源码级 Topic 盘点，详见 `docs/usv_ros2_interfaces.md`；仍需 USV
-  状态机负责人补齐运行样例、正式命令/ACK、车辆状态和安全接口，并完成 UAV 侧盘点。
+- UAV/USV 已完成源码级 Topic 盘点，详见 `docs/uav_ros2_interfaces.md` 和
+  `docs/usv_ros2_interfaces.md`；两车状态机负责人仍需补齐运行样例、正式命令/ACK、
+  权威任务结果、车辆状态和安全接口。
 - 由 UAV 负责人实现 UAV 生产适配器；由 USV 负责人实现 USV 生产适配器，并把
   `task_priority_manager.py` 接入真实任务管理节点。
 - 共同确认 UAV↔USV 各消息的最终 `payload`、坐标系、状态枚举和完成/失败条件。

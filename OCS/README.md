@@ -171,6 +171,8 @@ python .\ocs_bridge.py --config .\config.example.json
 ## 当前未完成任务
 
 - 冻结 UAV↔USV 最终 payload、坐标系、状态枚举和任务完成/失败判据。
+- UAV 源码级 Topic 和缺口已记录在 `../docs/uav_ros2_interfaces.md`；由 UAV 状态机/
+  飞控负责人补齐通用命令/ACK、统一车辆状态、Task1/3 权威结果和安全接口。
 - USV 源码级 Topic 和缺口已记录在 `../docs/usv_ros2_interfaces.md`；由 USV 状态机
   负责人补齐正式命令/ACK、车辆状态、Task4 checkpoint/恢复和安全接口。
 - 由 UAV/USV 状态机负责人分别完成生产 ROS 2 适配器；通信负责人只维护转换骨架和测试。
