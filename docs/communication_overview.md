@@ -249,6 +249,8 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 ## 6. 当前 OCS 项目状态
 
 - 官方 OCS 客户端已能连接、订阅 `RxCourse`/`RxCommand`，构造 `RunDeclaration`、Heartbeat、Task 1 报告。
+- OCS 请求序号、每车报告序号和已接收官方命令序号已通过 `logs/ocs_state.json` 原子持久化；
+  网关已提供心跳/ACK watchdog，只记录超时事件，不替 USV 执行 `SAFE_STOP` 或任务决策。
 - 官方 `RobotX_2026` schema 与 GitHub 最新主分支内容已下载并核对；当前本地 schema 文本与官方快照一致，主要差异只是换行格式。
 - 团队内部 MQTT 模拟链路已验证心跳、ACK、断线恢复；UAV↔USV 参考消息格式和
   通信骨架已完成，真实 ROS 2 状态机尚未接入。
@@ -317,7 +319,7 @@ Task 4 command 的内部 payload 必须携带官方 `command_seq` 和 `decision_
 
 | 模块 | 负责人 | 当前状态 |
 |---|---|---|
-| 官方 RoboCommand、OCS 网关、协议/schema、日志和测试 | 通信/OCS 负责人 | 基础实现完成，真实现场参数待填 |
+| 官方 RoboCommand、OCS 网关、协议/schema、日志和测试 | 通信/OCS 负责人 | OCS 独立部分完成，真实现场参数和四机验收待填 |
 | 通用车辆 MQTT 骨架与 UAV↔USV 直连骨架 | 通信/OCS 负责人 | 参考实现完成，不连接执行器 |
 | UAV ROS 2 ↔ 团队协议生产适配器 | UAV 状态机负责人 | 未完成 |
 | USV ROS 2 ↔ 团队协议生产适配器 | USV 状态机负责人 | 未完成 |

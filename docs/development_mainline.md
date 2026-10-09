@@ -27,8 +27,8 @@ USV ROS 2 ─ USV 状态机 ───────┘       └─ 官方报告/�
 | B. 官方 RoboCommand 客户端 | [~] | 连接、订阅、声明、心跳和部分 Task 1 构造已完成；正式运行校验仍未完成 |
 | C. 团队内部车辆通信协议 | [~] | OCS↔车辆 v1 和 UAV↔USV 参考协议已实现；真实 payload 与 ROS 2 映射待确认 |
 | D. UAV/USV ROS 2 适配器 | [~] | 通用通信骨架已提供；UAV/USV 负责人仍需分别实现自己的生产适配器 |
-| E. Task 1/3 官方报告转换 | [ ] | Task 1 有离线原型，Task 3 尚未完成真实报告适配；地图坐标转换已作为独立前置模块完成 |
-| F. 自动化和故障测试 | [ ] | 需要补 RunStart、重连、畸形消息和序号测试 |
+| E. Task 1/3 官方报告转换 | [~] | OCS 官方构造和显式 `official_report` 转换已完成；真实车辆字段仍待 UAV/USV 适配器 |
+| F. 自动化和故障测试 | [~] | OCS 纯 Python 测试已覆盖序号持久化和 watchdog；真实 Broker/四机验收仍待完成 |
 | G. 真实硬件联调 | [ ] | 必须先完成 D/E，并在 dry-run 或仿真中通过 |
 | H. 比赛现场运行流程 | [ ] | 依赖 Team Village 连接信息和全部接口验收 |
 
@@ -54,8 +54,8 @@ USV ROS 2 ─ USV 状态机 ───────┘       └─ 官方报告/�
 - [x] 从 retained `RxCourse` 读取并保存课程信息（已增加闭合边界校验；尚未接真实 broker）。
 - [x] 收到 `RunStart` 后校验 declaration sequence，并保存 `run_id`（已增加单元测试；尚未接真实 broker）。
 - [ ] 让两台参与车辆各自以 2 Hz 发布真实 Heartbeat。
-- [~] 让每辆车的官方 report sequence 在重连后继续单调递增（进程内保持；持久化/真实重连仍待验证）。
-- [~] 增加可靠重连、恢复订阅、发布失败处理和结构化日志（Paho 自动重连与订阅恢复已配置；真实 broker 验证未完成）。
+- [x] 让每辆车的官方 report sequence 在进程重启后继续单调递增（`logs/ocs_state.json` 原子持久化；真实 Broker 验证仍待完成）。
+- [~] 增加可靠重连、恢复订阅、发布失败处理和结构化日志（Paho 自动重连/订阅恢复和 JSON watchdog 事件已配置；真实 broker 验证未完成）。
 - [x] 接入官方 Task 3 `DockingReport`、`FirefightingReport`、`ResourceDeliveryRequest` 的构造函数。
 - [x] 接入官方 Task 4 `IncidentAck`、`ReadinessReport` 的构造函数；真实命令路由仍未接入。
 
@@ -122,7 +122,7 @@ placeholder，Task3 控制闭环未完成。完整证据分别见 `uav_ros2_inte
 
 ## F. 自动化验证
 
-- [x] Python 语法检查和基础协议单元测试（当前 23 项通过）。
+- [x] Python 语法检查、协议单元测试、序号持久化和 watchdog 单元测试（当前 30 项，需在项目 venv 中运行）。
 - [~] 官方 schema 离线消息回归（14 类消息可构造/解析；真实 Mosquitto/test server 未运行，当前环境缺 Docker/Mosquitto）。
 - [ ] 电脑 B 安装 Docker/Compose，准备官方 `RobotX_2026` Broker/test server、稳定测试网
   IP、TCP 1883 和官方侧日志目录。
@@ -134,7 +134,7 @@ placeholder，Task3 控制闭环未完成。完整证据分别见 `uav_ros2_inte
 - [ ] 模拟 `RunStart`：匹配 declaration sequence 才允许进入运行状态。
 - [ ] 两台车 2 Hz Heartbeat 至少 30 秒，序号独立递增。
 - [ ] Task 1/3 模拟报告被官方测试服务正确解码。
-- [ ] Broker 临时停止后自动重连并恢复序号。
+- [ ] Broker 临时停止后自动重连，并在项目 venv/真实 Broker 中验证持久化序号。
 - [ ] 错误 Team ID、错误 vehicle ID、错误 sequence、畸形 JSON/Protobuf 不执行任务。
 - [ ] 生成一次测试摘要和可复核日志包。
 

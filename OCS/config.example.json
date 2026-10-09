@@ -1,6 +1,11 @@
 {
   "team_id": "TONG",
   "mission_coordinator": "T-Wave",
+  "state_path": "logs/ocs_state.json",
+  "watchdog": {
+    "heartbeat_timeout_s": 3.0,
+    "command_ack_timeout_s": 5.0
+  },
   "internal_broker": {
     "host": "127.0.0.1",
     "port": 1883,

@@ -43,10 +43,16 @@ python3 vehicle_agent.py --vehicle-id T-Wave --broker <internal-broker-ip> --sim
 `ocs_client.py` 只把经过校验的 `RunStart` 和官方 Task 4 命令排队给 USV
 任务协调器；不会在 OCS 内判断当前执行哪个任务，也不会直接启动 UAV。
 收到官方 `RunStart` 后只给 `T-Wave` 发送 `RUN_START`。Task 4 命令由 USV
+
 决定是否抢占 Task 1/3、如何协调 UAV 以及何时恢复。车辆 ACK 和 Readiness
 由 `accept_vehicle_ack()`、`accept_vehicle_readiness_report()` 转换为官方报告。
 需要发送给 USV 的动作由 `drain_internal_actions()` 取出，再交给独立的
 `vehicle_link.py` 通过团队 JSON/MQTT 链路发送。
+
+`sequence_store.py` 会把请求序号、每车报告序号和已接收的官方命令序号原子写入
+`logs/ocs_state.json`，避免 OCS 重启后复用序号。`watchdog.py` 由网关调用，默认检测
+3 秒心跳超时和 5 秒 ACK 超时，并输出一行 JSON 事件；它不会自动发送 `SAFE_STOP`，也
+不会代替 USV 做任务选择、抢占或完成判断。
 
 `task_priority_manager.py` 现在只是 USV 任务协调器的参考状态机，不被 OCS
 客户端调用；真正接入时应放入 USV 的任务管理节点。

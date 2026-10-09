@@ -25,6 +25,8 @@
 - `OCS/ocs_gateway.py`：连接官方 Broker 与内部车辆 Broker。
 - `OCS/ocs_client.py`：官方 RoboCommand MQTT/Protobuf 客户端和报告转换。
 - `OCS/vehicle_protocol.py`：内部 JSON envelope、Topic 和命令格式。
+- `OCS/sequence_store.py`：OCS 请求、报告和官方命令序号的持久化。
+- `OCS/watchdog.py`：车辆心跳/命令 ACK 超时检测；只报警，不替 USV 做任务决策。
 - `OCS/vehicle_agent.py`：Orin-LQ 侧安全模拟器/适配器骨架。
 - `OCS/fsm_protocol.py`：UAV↔USV 状态机直连 JSON 协议和校验。
 - `OCS/fsm_link.py`：UAV/USV 状态机 MQTT 通信骨架，不连接执行器。
@@ -36,6 +38,7 @@
 - `OCS/vehicle_link_contract.md`：内部协议正式草案。
 - `docs/communication_overview.md`：当前通信架构和官方/内部接口总览。
 - `docs/development_mainline.md`：开发进度、阻塞项和验收主线。
+- `docs/ocs_independent_test_record.md`：本次 OCS 独立功能的测试记录。
 - `examples/`：可用于联调的 JSON 示例。
 
 ## 联调
@@ -78,11 +81,12 @@ python3 ocs_gateway.py \
 ### OCS / 电脑 A
 
 - 把两车负责人最终确认的 ROS 2 字段映射接入 OCS 内部协议，不接收未确认的模拟字段。
-- 完成车辆心跳、ACK 和任务报告的通信与任务超时监控（watchdog）、断线重连、旧
-  `run_id` 隔离、重复消息和乱序序号测试。
+- [x] 完成 OCS 侧车辆心跳、ACK 和 watchdog、断线重连钩子、旧 `run_id` 隔离、重复消息
+  和乱序序号测试；真实四机联调仍待现场完成。
 - 只根据车辆明确提供的 `official_report` 生成官方 Task1/3 报告，不根据超时或
   `phase=COMPLETE` 自行判断完成。
-- 完成报告序号持久化、结构化日志和可复核测试日志包。
+- [x] 完成报告/请求序号持久化、官方命令序号跨重启保护，以及 JSON watchdog 事件日志；
+  可复核测试日志包仍需四机联调后生成。
 - 填写正式 UAV geofence、Team Village Broker/网卡参数；密钥或现场敏感参数不提交仓库。
 
 ### USV / T-Wave

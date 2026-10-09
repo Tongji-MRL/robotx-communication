@@ -36,6 +36,7 @@ if str(GEN_ROOT) not in sys.path:
 import common_pb2  # noqa: E402
 from robotx import rx_commands_pb2, rx_common_pb2, rx_course_pb2  # noqa: E402
 from robotx import rx_reports_pb2, rx_requests_pb2  # noqa: E402
+from sequence_store import SequenceStore  # noqa: E402
 
 
 
@@ -126,6 +127,7 @@ class OcsClient:
         broker_port: int,
         team_id: str = "TONG",
         mission_coordinator: str = "T-Wave",
+        state_path: str | Path | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit(
@@ -138,14 +140,15 @@ class OcsClient:
             raise ValueError("mission_coordinator must not be empty")
         self.team_id = team_id
         self.mission_coordinator = mission_coordinator
-        self._team_seq = 0
-        self._report_seq: dict[str, int] = {}
+        self._sequence_store = SequenceStore(state_path)
+        self._team_seq = self._sequence_store.team_seq
+        self._report_seq: dict[str, int] = self._sequence_store.report_seq
         self._declared_vehicle_ids: set[str] = set()
         self.declaration_seq: int | None = None
         self.run_id: int | None = None
         self.course: rx_course_pb2.RxCourse | None = None
         self.last_command: rx_commands_pb2.RxCommand | None = None
-        self._last_command_seq = 0
+        self._last_command_seq = self._sequence_store.last_command_seq
         # Actions are deliberately queued instead of published here. The
         # official RoboCommand broker and the team vehicle broker are separate
         # protocol boundaries; vehicle_link.py is the internal MQTT adapter.
@@ -262,6 +265,7 @@ class OcsClient:
                 f"for official command seq={command.seq}"
             )
         self._last_command_seq = command.seq
+        self._sequence_store.observe_command_seq(command.seq)
         self.last_command = rx_commands_pb2.RxCommand()
         self.last_command.CopyFrom(command)
 
@@ -504,7 +508,7 @@ class OcsClient:
 
     def _publish_vehicle_body(self, vehicle_id: str, body_name: str, body) -> int:
         self._check_vehicle(vehicle_id)
-        seq = self._report_seq.get(vehicle_id, 0) + 1
+        seq = self._sequence_store.next_report_seq(vehicle_id)
         self._report_seq[vehicle_id] = seq
         report = rx_reports_pb2.RxReport(
             team_id=self.team_id,
@@ -543,11 +547,9 @@ class OcsClient:
         self._declared_vehicle_ids = set(ids)
         self.run_id = None
         self.last_command = None
-        self._last_command_seq = 0
-        self._report_seq.clear()
         self._pending_internal_actions.clear()
         self._relayed_official_commands.clear()
-        self._team_seq += 1
+        self._team_seq = self._sequence_store.next_team_seq()
         declaration = rx_requests_pb2.RunDeclaration(
             vehicle_ids=ids,
             task1_tier=_enum(task_tiers[0], TIER_MAP, "task1 tier"),
@@ -583,7 +585,7 @@ class OcsClient:
         flight_phase: int | str = "unknown",
     ) -> int:
         self._check_vehicle(vehicle_id)
-        seq = self._report_seq.get(vehicle_id, 0) + 1
+        seq = self._sequence_store.next_report_seq(vehicle_id)
         self._report_seq[vehicle_id] = seq
         report = rx_reports_pb2.RxReport(
             team_id=self.team_id,
@@ -718,6 +720,7 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--broker", help="override broker host; default comes from config")
     parser.add_argument("--port", type=int, help="override broker port; default comes from config")
+    parser.add_argument("--state-path", type=Path, help="durable sequence state; default comes from config")
     parser.add_argument("--duration", type=float, default=10.0, help="seconds to keep the client connected")
     parser.add_argument("--publish-declaration", action="store_true", help="publish current TONG declaration")
     parser.add_argument("--demo-heartbeats", action="store_true", help="publish synthetic heartbeats at 2 Hz")
@@ -736,7 +739,8 @@ def main() -> int:
     task_tiers, uav_geofence = declaration_values(config)
     host = args.broker or host
     port = args.port or port
-    client = OcsClient(host, port, team_id)
+    state_path = args.state_path or Path(config.get("state_path", "logs/ocs_state.json"))
+    client = OcsClient(host, port, team_id, state_path=state_path)
     try:
         client.connect()
         if args.publish_declaration:

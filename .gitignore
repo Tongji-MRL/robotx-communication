@@ -5,6 +5,7 @@ __pycache__/
 .mypy_cache/
 logs/*.log
 logs/*.jsonl
+logs/*.json
 *.bag
 *.db3
 .env

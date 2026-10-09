@@ -1,4 +1,5 @@
 import types
+import tempfile
 import unittest
 
 import ocs_client
@@ -155,6 +156,23 @@ class OcsClientTests(unittest.TestCase):
         })
         self.assertEqual(self.published[-1][1].vehicle_id, "T-Sky")
         self.assertEqual(self.published[-1][1].WhichOneof("body"), "readiness")
+
+    def test_client_sequences_continue_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = f"{directory}/ocs_state.json"
+            first = ocs_client.OcsClient("127.0.0.1", 1883, state_path=state_path)
+            first_published = []
+            first._publish = lambda topic, message: first_published.append((topic, message)) or 1
+            first.publish_run_declaration(["T-Wave"])
+            first.publish_heartbeat("T-Wave", latitude=1.0, longitude=2.0)
+
+            second = ocs_client.OcsClient("127.0.0.1", 1883, state_path=state_path)
+            second_published = []
+            second._publish = lambda topic, message: second_published.append((topic, message)) or 1
+            second.publish_run_declaration(["T-Wave"])
+            second.publish_heartbeat("T-Wave", latitude=1.0, longitude=2.0)
+            self.assertEqual(second_published[0][1].seq, 2)
+            self.assertEqual(second_published[1][1].seq, 2)
 
 
 if __name__ == "__main__":
