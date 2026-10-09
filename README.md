@@ -107,8 +107,9 @@ python3 ocs_gateway.py \
 
 ### 电脑 B / 官方模拟端
 
-- 安装 Docker Engine 和 Docker Compose，准备官方 `RobotX_2026` schema/test server；
-  若现场无 Internet，应提前拉取或导入 `eclipse-mosquitto:2` 和测试镜像。
+- 电脑 B 不需要 Ubuntu 交接包，也不需要克隆本通信仓库；只需准备官方
+  `robonation/robocommand` 仓库中的 `RobotX_2026` 测试工具、Docker Engine 和 Docker Compose。
+- 若现场无 Internet，应提前在电脑 B 拉取或导入 `eclipse-mosquitto:2` 和官方测试镜像。
 - 使用稳定测试网 IP，让电脑 A 能访问 TCP 1883；测试网络与真实比赛网络、车辆执行器
   网络隔离。当前测试配置允许匿名 MQTT，只能用于受控实验室网络。
 - 配置与 OCS 一致的 Team ID `TONG`、车辆 ID `T-Sky/T-Wave`、课程边界和测试时间；
@@ -131,13 +132,26 @@ python3 ocs_gateway.py \
 
 ## 电脑 B 快速启动官方模拟
 
-电脑 B 不需要 ROS 2。`RobotX_2026` 官方工具不重复提交在本仓库中，应从 Ubuntu
-交接包或已核验的官方 RoboCommand 快照取得。进入该目录后执行：
+电脑 B 不需要 ROS 2、Ubuntu 交接包或本通信仓库。电脑 B 单独从官方 GitHub 准备工具：
 
 ```bash
-cd RobotX_2026
+git clone https://github.com/robonation/robocommand.git
+cd robocommand/RobotX_2026
 docker compose up --build
 ```
+
+如果官方仓库已经提前下载，只需进入其中的 `RobotX_2026/` 目录。电脑 B 启动前确认：
+
+```bash
+hostname -I
+docker --version
+docker compose version
+ss -lnt | grep 1883
+```
+
+把电脑 B 的测试网 IP 告诉电脑 A；电脑 A 的 OCS 使用
+`--official-broker <电脑B_IP> --official-port 1883` 连接，不能使用电脑 A 的
+`127.0.0.1`。如电脑 B 开启防火墙，只允许电脑 A 访问 TCP 1883。
 
 这会启动 Mosquitto（TCP 1883）和官方测试服务。测试服务会发布 retained `RxCourse`、
 记录所有 `robocommand/robotx/#` 消息，并在收到 `RunDeclaration` 且所有声明车辆上报
@@ -163,8 +177,7 @@ assistance-request --team TONG --vehicle-type usv --lat 1.2805 --lng 103.8557
 docker compose down
 ```
 
-电脑 A 的 `--official-broker` 必须填写电脑 B 在测试网中的 IP，不能填电脑 A 自己的
-`127.0.0.1`。正式比赛时应改用 Team Village 提供的地址，不能继续运行电脑 B 模拟服务。
+正式比赛时应改用 Team Village 地址，不能继续运行电脑 B 模拟服务。
 
 ## 测试
 
