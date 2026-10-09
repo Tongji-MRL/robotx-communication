@@ -1,6 +1,6 @@
 # RobotX 2026 OCS 程序开发主线
 
-更新时间：2026-10-08
+更新时间：2026-10-09
 
 这份文档是 OCS 开发的唯一进度主线。完成一项后，把对应 `[ ]` 改成 `[x]`；
 部分完成使用 `[~]`，并在“当前阻塞/待确认”中补充证据。以后新增工作应归入下面某个阶段，
@@ -124,6 +124,10 @@ placeholder，Task3 控制闭环未完成。完整证据分别见 `uav_ros2_inte
 
 - [x] Python 语法检查和基础协议单元测试（当前 23 项通过）。
 - [~] 官方 schema 离线消息回归（14 类消息可构造/解析；真实 Mosquitto/test server 未运行，当前环境缺 Docker/Mosquitto）。
+- [ ] 电脑 B 安装 Docker/Compose，准备官方 `RobotX_2026` Broker/test server、稳定测试网
+  IP、TCP 1883 和官方侧日志目录。
+- [ ] 电脑 B 将 RunStart 与 Task4 注入统一到同一个命令序号生成源，确保每个 Team 的
+  `RxCommand.seq` 严格递增；不得混用自动 RunStart 与会从 1 重置的一次性测试客户端。
 - [ ] 官方本地 Broker/test server 启动测试。
 - [ ] 正确收到 retained `RxCourse`。
 - [ ] 正确收到 `RunDeclaration`，任务等级和车辆 ID 正确。
@@ -191,3 +195,5 @@ placeholder，Task3 控制闭环未完成。完整证据分别见 `uav_ros2_inte
    `RUN_START/STOP/FAULT/COMPLETE` ROS 2 映射尚未定稿；坐标转换不由 OCS 负责。
 8. UAV 和 USV 的生产适配器尚未实现；分别由对应状态机负责人负责，通信负责人提供
    通用骨架、协议测试和联调审查。
+9. 电脑 B 官方模拟端尚未完成固定网络、统一 `RxCommand.seq` 生成、Task4 自动注入和
+   四端日志时间线验收。

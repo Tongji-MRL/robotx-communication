@@ -170,6 +170,8 @@ python .\ocs_bridge.py --config .\config.example.json
 
 ## 当前未完成任务
 
+完整的 OCS、USV、UAV、电脑 B 责任划分和电脑 B 官方模拟步骤见 `../README.md`。
+
 - 冻结 UAV↔USV 最终 payload、坐标系、状态枚举和任务完成/失败判据。
 - UAV 源码级 Topic 和缺口已记录在 `../docs/uav_ros2_interfaces.md`；由 UAV 状态机/
   飞控负责人补齐通用命令/ACK、统一车辆状态、Task1/3 权威结果和安全接口。
@@ -177,5 +179,6 @@ python .\ocs_bridge.py --config .\config.example.json
   负责人补齐正式命令/ACK、车辆状态、Task4 checkpoint/恢复和安全接口。
 - 由 UAV/USV 状态机负责人分别完成生产 ROS 2 适配器；通信负责人只维护转换骨架和测试。
 - 在 USV-Orin 接入 Task4 抢占、checkpoint 持久化、恢复和 `SAFE_STOP`。
-- 完成电脑 B、电脑 A、UAV-Orin、USV-Orin 四机联调及断线/超时/旧 run 测试。
+- 完成电脑 B、电脑 A、UAV-Orin、USV-Orin 四机联调，以及通信与任务超时监控
+  （watchdog）、断线、旧 run 和重复消息测试。
 - 填写真实 geofence、Broker 和比赛网卡参数；在测试通过前不连接真实执行器。

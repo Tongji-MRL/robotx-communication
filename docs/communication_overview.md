@@ -1,6 +1,6 @@
 # RobotX 2026 通信流程与接口总览
 
-更新时间：2026-10-08
+更新时间：2026-10-09
 资料依据：RoboNation Handbook 3.4（官网最新页面）、官方 `robonation/robocommand` 的
 `RobotX_2026` 目录、团队 `task_flow.pdf`。
 
@@ -272,6 +272,8 @@ USV 的 Task 3 停泊完成、喷水完成、颜色识别完成必须有明确�
 5. OCS 如何安全地向 USV 任务协调器发送开始/停止/Task 4 官方事件，以及 USV 如何协调 UAV。
 6. 最终 Team ID、vehicle ID、任务等级和比赛现场 RoboCommand 连接参数。
 7. 官方最新 schema 变更后的全量本地测试：RunDeclaration、RunStart、2 Hz Heartbeat、Task 1/3 报告、Task 4 ACK/Readiness、重连和旧 run 隔离。
+8. 电脑 B 官方模拟端统一生成单调递增的 `RxCommand.seq`，不能把自动 RunStart 与每次
+   从 1 重新计数的一次性 Task4 客户端混用。
 
 ## 8. Ubuntu 交接后的只读审计与离线验证（2026-10-06）
 
