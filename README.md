@@ -39,6 +39,7 @@
 - `docs/communication_overview.md`：当前通信架构和官方/内部接口总览。
 - `docs/development_mainline.md`：开发进度、阻塞项和验收主线。
 - `docs/ocs_independent_test_record.md`：本次 OCS 独立功能的测试记录。
+- `docs/usv_fsm_dryrun_review.md`：T-Wave 状态机 dry-run 包的 Orin 部署审查和边界。
 - `examples/`：可用于联调的 JSON 示例。
 
 ## 联调
