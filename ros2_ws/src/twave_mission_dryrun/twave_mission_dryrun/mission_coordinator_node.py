@@ -11,6 +11,7 @@ from std_msgs.msg import String
 
 from .bridge import MissionBridge
 from .protocol import encode
+from .vehicle_status_store import VehicleStatusStore
 from usv_main_fsm.audit_log import AuditLogger
 
 
@@ -33,9 +34,15 @@ class MissionCoordinatorNode(Node):
             "task_report": self.create_publisher(String, f"{MISSION_BASE}/task_report", 10),
             "fault": self.create_publisher(String, f"{MISSION_BASE}/fault", 10),
         }
-        self.bridge = MissionBridge(Path(self.get_parameter("checkpoint_path").value), self._publish, AuditLogger(default_log))
+        self.vehicle_status_store = VehicleStatusStore()
+        self.bridge = MissionBridge(
+            Path(self.get_parameter("checkpoint_path").value), self._publish,
+            AuditLogger(default_log), self.vehicle_status_store,
+        )
         self.create_subscription(String, f"{MISSION_BASE}/run_start", self._run_start, 10)
         self.create_subscription(String, f"{MISSION_BASE}/task4_cmd", self._task4_cmd, 10)
+        self.create_subscription(String, "/tongji_mrl/twave/progress", self._twave_progress, 10)
+        self.create_subscription(String, "/tongji_mrl/tsky/progress", self._tsky_progress, 10)
         self.create_subscription(String, f"{INTERNAL_BASE}/usv_ack", self._ack, 10)
         self.create_subscription(String, f"{INTERNAL_BASE}/usv_event", self._event, 10)
         self.create_subscription(String, f"{INTERNAL_BASE}/fault", self._fault, 10)
@@ -53,6 +60,18 @@ class MissionCoordinatorNode(Node):
 
     def _task4_cmd(self, msg: String) -> None:
         self.bridge.handle_task4_cmd(msg.data)
+
+    def _twave_progress(self, msg: String) -> None:
+        self._update_vehicle_progress("T-Wave", msg.data)
+
+    def _tsky_progress(self, msg: String) -> None:
+        self._update_vehicle_progress("T-Sky", msg.data)
+
+    def _update_vehicle_progress(self, vehicle: str, status_bits: str) -> None:
+        try:
+            self.vehicle_status_store.update(vehicle, status_bits)
+        except ValueError as exc:
+            self.get_logger().warning(f"ignored invalid {vehicle} progress: {exc}")
 
     def _ack(self, msg: String) -> None:
         self.bridge.handle_ack(msg.data)

@@ -22,6 +22,7 @@ class OcsClientTests(unittest.TestCase):
         course.corners.add(latitude=1.0, longitude=2.0)
         self.client._on_message(None, None, self.message("robocommand/robotx/course", course.SerializeToString()))
         self.assertEqual(self.client.course.course_id, "RX2026-A")
+        self.assertEqual(self.client.course_store.get().course_id, "RX2026-A")
 
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
         command = rx_commands_pb2.RxCommand(
@@ -67,6 +68,12 @@ class OcsClientTests(unittest.TestCase):
             self.client.publish_heartbeat("T-Wave", latitude=1.0, longitude=2.0)
 
     def test_ocs_routes_to_usv_without_deciding_the_current_task(self) -> None:
+        course = rx_course_pb2.RxCourse(course_id="RX2026-A")
+        course.corners.add(latitude=1.0, longitude=2.0)
+        course.corners.add(latitude=1.0, longitude=3.0)
+        course.corners.add(latitude=2.0, longitude=3.0)
+        course.corners.add(latitude=1.0, longitude=2.0)
+        self.client._accept_course(course)
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
         run_start = rx_commands_pb2.RxCommand(
             team_id="TONG",
@@ -111,6 +118,20 @@ class OcsClientTests(unittest.TestCase):
         self.assertEqual(self.client.drain_internal_actions()[0]["command"], "TASK4_READINESS_CONFIRM")
         self.client.accept_vehicle_ack("T-Wave", command_seq=3, accepted=True)
         self.assertEqual(self.client.drain_internal_actions(), [])
+
+    def test_run_start_without_course_is_rejected_before_relay(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        command = rx_commands_pb2.RxCommand(
+            team_id="TONG", seq=1,
+            run_start=rx_commands_pb2.RunStart(
+                declaration_seq=self.client.declaration_seq, run_id=42,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "RxCourse"):
+            self.client._accept_command(command)
+        self.assertIsNone(self.client.run_id)
+        self.assertEqual(self.client.drain_internal_actions(), [])
+        self.assertEqual(self.client.last_rejection_reason, "RunStart received before a valid RxCourse")
 
     def test_vehicle_task_report_is_converted_only_when_official_report_is_present(self) -> None:
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])

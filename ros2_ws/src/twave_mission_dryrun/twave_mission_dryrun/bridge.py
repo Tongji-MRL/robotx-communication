@@ -14,6 +14,7 @@ from usv_main_fsm.safety_monitor import SafetyMonitor
 from usv_main_fsm.audit_log import AuditLogger
 
 from .protocol import ProtocolError, decode, encode, envelope
+from .vehicle_status_store import VehicleStatusStore
 
 
 Publish = Callable[[str, dict[str, Any]], None]
@@ -26,7 +27,8 @@ class MissionBridge:
     existing UAV fake/MQTT candidate remains outside this ROS test transport.
     """
 
-    def __init__(self, checkpoint_path: str | Path, publish: Publish, audit_logger: AuditLogger | None = None) -> None:
+    def __init__(self, checkpoint_path: str | Path, publish: Publish, audit_logger: AuditLogger | None = None,
+                 vehicle_status_store: VehicleStatusStore | None = None) -> None:
         targets = {task: (Target.USV,) for task in TaskId}
         self.coordinator = MissionCoordinator(CheckpointStore(checkpoint_path), task_targets=targets, audit_logger=audit_logger)
         self.coordinator.arm_for_run_start()
@@ -35,6 +37,7 @@ class MissionBridge:
         self.safety_monitor = SafetyMonitor()
         self.safety_level = SafetyLevel.NORMAL
         self.safety_reason = "no active safety events"
+        self.vehicle_status_store = vehicle_status_store or VehicleStatusStore()
 
     def handle_command(self, raw: str) -> None:
         try:
@@ -185,12 +188,17 @@ class MissionBridge:
 
     def _publish_state(self, note: str = "") -> None:
         run_id = self.coordinator.run_id or 0
+        vehicles = {
+            vehicle: {"status_bits": status["status_bits"]}
+            for vehicle, status in self.vehicle_status_store.get_all().items()
+        }
         self.publish("status", envelope(run_id=run_id, state=self.coordinator.state.value,
             task=self.coordinator.current_task.value if self.coordinator.current_task else None,
             pending_command_ids=sorted(self.coordinator.pending_command_ids), dry_run=True, note=note,
             safety_level=self.safety_level.name, safety_reason=self.safety_reason,
             safe_hold_reason=self.coordinator.safe_hold_reason,
-            safe_stop_reason=self.coordinator.safety_stop_record.reason if self.coordinator.safety_stop_record else ""))
+            safe_stop_reason=self.coordinator.safety_stop_record.reason if self.coordinator.safety_stop_record else "",
+            vehicles=vehicles))
 
     def _publish_fault(self, run_id: int, code: str, detail: str) -> None:
         self.publish("fault", envelope(run_id=run_id, source="mission_bridge", code=code, detail=detail, dry_run=True))

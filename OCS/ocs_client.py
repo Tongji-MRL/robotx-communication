@@ -14,8 +14,14 @@ import argparse
 import json
 import sys
 import time
+from datetime import timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
+
+try:
+    from .course_store import CourseStore
+except ImportError:  # Script/test execution directly from the OCS directory.
+    from course_store import CourseStore
 
 try:
     import paho.mqtt.client as mqtt
@@ -144,6 +150,8 @@ class OcsClient:
         self.declaration_seq: int | None = None
         self.run_id: int | None = None
         self.course: rx_course_pb2.RxCourse | None = None
+        self.course_store = CourseStore()
+        self.last_rejection_reason: str | None = None
         self.last_command: rx_commands_pb2.RxCommand | None = None
         self._last_command_seq = 0
         # Actions are deliberately queued instead of published here. The
@@ -222,6 +230,12 @@ class OcsClient:
         self._validate_course(course)
         self.course = rx_course_pb2.RxCourse()
         self.course.CopyFrom(course)
+        self.course_store.update(
+            course_id=course.course_id,
+            pinger_freq_hz=course.pinger_freq_hz,
+            corners=((corner.latitude, corner.longitude) for corner in course.corners),
+            sent_at=course.sent_at.ToDatetime(tzinfo=timezone.utc),
+        )
 
     def _accept_command(self, command: rx_commands_pb2.RxCommand) -> None:
         if command.team_id != self.team_id:
@@ -238,7 +252,11 @@ class OcsClient:
                 raise ValueError("RunStart.declaration_seq does not match the declaration")
             if not command.run_start.run_id:
                 raise ValueError("RunStart.run_id must not be zero")
+            if self.course_store.get() is None:
+                self.last_rejection_reason = "RunStart received before a valid RxCourse"
+                raise ValueError(self.last_rejection_reason)
             self.run_id = command.run_start.run_id
+            self.last_rejection_reason = None
             self._relayed_official_commands[command.seq] = "run_start"
             self._queue_internal_action({
                 "kind": "internal_command",
