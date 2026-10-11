@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>usv_main_fsm</name>
+  <version>0.1.0</version>
+  <description>Transport-neutral T-Wave mission decision core.</description>
+  <maintainer email="robotx@example.invalid">RobotX</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>robotx_ocs_protocol</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

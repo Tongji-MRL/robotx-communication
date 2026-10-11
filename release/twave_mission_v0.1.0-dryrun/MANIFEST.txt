@@ -1,0 +1,14 @@
+v0.1.0-dryrun delivery manifest
+
+OCS/                         Shared OCS vehicle/FSM protocol source, tests, ament metadata.
+usv_main_fsm/                Pure-Python coordinator, safety, persistence, audit log, tests, metadata.
+ros2_ws/src/twave_mission_dryrun/
+                             ROS 2 dry-run node, FakeUSVExecutor, launch, bridge/integration tests,
+                             resource index and ament metadata.
+deploy/twave_mission/        Ubuntu Humble dry-run build, test, start, stop, state and log tools.
+README_DEPLOY.md             Chinese teammate deployment and safety handoff guide.
+VERSION                       Release identifier.
+
+Excluded by packaging policy: VCS data, virtual environments, bytecode/cache,
+build/install/log products, .env/credentials, checkpoint/SAFE_STOP state,
+JSONL runtime logs and temporary test data.

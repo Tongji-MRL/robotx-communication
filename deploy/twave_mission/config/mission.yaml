@@ -1,0 +1,4 @@
+/**:
+  ros__parameters:
+    dry_run: true
+    checkpoint_path: "${TWAVE_MISSION_STATE_DIR}/checkpoint.json"

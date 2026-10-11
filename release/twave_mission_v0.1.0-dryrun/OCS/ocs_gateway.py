@@ -35,10 +35,6 @@ class OcsGateway:
         internal_port: int,
         team_id: str = "TONG",
         mission_coordinator: str = "T-Wave",
-        internal_command_topic: str | None = None,
-        internal_subscription_topic: str | None = None,
-        internal_username: str | None = None,
-        internal_password: str | None = None,
     ) -> None:
         self.ocs = OcsClient(
             official_broker,
@@ -50,10 +46,6 @@ class OcsGateway:
             internal_broker,
             internal_port,
             on_message=self.ocs.accept_vehicle_envelope,
-            command_topic=internal_command_topic,
-            subscription_topic=internal_subscription_topic,
-            username=internal_username,
-            password=internal_password,
         )
 
     def connect(self) -> None:
@@ -97,10 +89,6 @@ def main() -> int:
     parser.add_argument("--internal-broker", help="team internal broker")
     parser.add_argument("--internal-port", type=int, default=1883)
     parser.add_argument("--mission-coordinator", default="T-Wave")
-    parser.add_argument("--internal-command-topic", help="T-Wave internal command topic")
-    parser.add_argument("--internal-subscription-topic", help="internal vehicle report subscription filter")
-    parser.add_argument("--internal-username", help="internal MQTT username")
-    parser.add_argument("--internal-password", help="internal MQTT password")
     parser.add_argument("--duration", type=float, default=0.0, help="0 means continuous")
     parser.add_argument(
         "--publish-declaration",
@@ -125,10 +113,6 @@ def main() -> int:
         internal_port=internal_port,
         team_id=team_id,
         mission_coordinator=args.mission_coordinator,
-        internal_command_topic=args.internal_command_topic,
-        internal_subscription_topic=args.internal_subscription_topic,
-        internal_username=args.internal_username,
-        internal_password=args.internal_password,
     )
     try:
         gateway.connect()

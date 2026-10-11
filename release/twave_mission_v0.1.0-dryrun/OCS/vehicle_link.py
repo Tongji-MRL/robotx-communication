@@ -43,20 +43,12 @@ class VehicleLink:
         port: int,
         vehicle_id: str | None = None,
         on_message: Callable[[dict[str, Any]], None] | None = None,
-        command_topic: str | None = None,
-        subscription_topic: str | None = None,
-        username: str | None = None,
-        password: str | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
         self.vehicle_id = vehicle_id
         self.on_message = on_message
-        self.command_topic = command_topic or topic("T-Wave", "command")
-        self.subscription_topic = subscription_topic or f"tongji/robotx/v1/{vehicle_id or '+'}/+"
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        if username:
-            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
@@ -67,8 +59,9 @@ class VehicleLink:
         if reason_code != 0:
             print(f"[MQTT] connection failed: {reason_code}", file=sys.stderr)
             return
-        client.subscribe(self.subscription_topic, qos=1)
-        print(f"[MQTT] connected; observing {self.subscription_topic}")
+        suffix = self.vehicle_id or "+"
+        client.subscribe(f"tongji/robotx/v1/{suffix}/+", qos=1)
+        print(f"[MQTT] connected; observing {topic_filter()}")
 
     @staticmethod
     def _on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
@@ -93,12 +86,11 @@ class VehicleLink:
             vehicle_id, "command", command_payload(command, task_id=task_id),
             run_id=run_id, source="ocs",
         )
-        mqtt_topic = self.command_topic if vehicle_id == "T-Wave" else topic(vehicle_id, "command")
-        result = self.client.publish(mqtt_topic, encode(message), qos=1)
+        result = self.client.publish(topic(vehicle_id, "command"), encode(message), qos=1)
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"command publish failed: {result.rc}")
-        print(f"[TxCommand] {message['message_id']} -> {mqtt_topic}")
+        print(f"[TxCommand] {message['message_id']} -> {topic(vehicle_id, 'command')}")
 
     def send_action(self, action: dict) -> None:
         """Publish one action returned by ``OcsClient.drain_internal_actions``."""
@@ -124,12 +116,11 @@ class VehicleLink:
             run_id=action.get("run_id"),
             source="ocs",
         )
-        mqtt_topic = self.command_topic if vehicle_id == "T-Wave" else topic(vehicle_id, "command")
-        result = self.client.publish(mqtt_topic, encode(message), qos=1)
+        result = self.client.publish(topic(vehicle_id, "command"), encode(message), qos=1)
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"command publish failed: {result.rc}")
-        print(f"[TxCommand] {message['message_id']} -> {mqtt_topic}")
+        print(f"[TxCommand] {message['message_id']} -> {topic(vehicle_id, 'command')}")
 
     def close(self) -> None:
         self.client.loop_stop()
