@@ -84,8 +84,20 @@ class VehicleLink:
             print(f"[MQTT] ignored malformed message on {message.topic}: {exc}", file=sys.stderr)
 
     def connect(self) -> None:
+        # The TCP connect call can succeed before the MQTT CONNACK arrives.
+        # Fail closed if the internal broker did not accept this client.
         self.client.connect(self.broker, self.port, keepalive=60)
         self.client.loop_start()
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self.client.is_connected():
+                return
+            time.sleep(0.1)
+        self.client.loop_stop()
+        raise ConnectionError(
+            f"Internal MQTT {self.broker}:{self.port} not connected within 10s; "
+            "check broker status and MQTT username/password"
+        )
 
     def send(self, vehicle_id: str, command: str, task_id: str | None = None,
              run_id: int | None = None) -> None:

@@ -116,10 +116,22 @@ class TWaveMqttRuntimeNode(Node):
 
     def _report(self, name: str, msg: String) -> None:
         from .protocol import decode
+
+        # Temporary dry-run isolation.
+        # Keep status on its original ROS2 topic.
+        if name == "status":
+            return
+
         try:
-            self.runtime.receive_mission_report(name, decode(msg.data))
+            payload = decode(
+                msg.data,
+                required={"schema_version", "timestamp", "run_id"},
+            )
+            self.runtime.receive_mission_report(name, payload)
         except Exception as exc:
-            self.get_logger().error(f"rejected mission {name}: {exc}")
+            self.get_logger().error(
+                f"rejected mission {name}: {exc}"
+            )
 
 
 def main() -> None:
