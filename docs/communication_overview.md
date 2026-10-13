@@ -1,8 +1,9 @@
 # RobotX 2026 通信流程与接口总览
 
-更新时间：2026-10-09
+更新时间：2026-10-13
 资料依据：RoboNation Handbook 3.4（官网最新页面）、官方 `robonation/robocommand` 的
-`RobotX_2026` 目录、团队 `task_flow.pdf`。
+`RobotX_2026` 目录、团队 `task_flow.pdf` 和《通信及规划》团队规划稿。规划稿中的候选
+内部接口与当前采用的 OCS/车辆协议差异，见 `communication_plan_reference.md`。
 
 ## 1. 先区分两条通信边界
 

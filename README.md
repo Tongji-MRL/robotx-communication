@@ -37,6 +37,7 @@
 - `docs/uav_usv_state_machine_link.md`：UAV↔USV Topic、消息格式、ACK 和责任边界。
 - `OCS/vehicle_link_contract.md`：内部协议正式草案。
 - `docs/communication_overview.md`：当前通信架构和官方/内部接口总览。
+- `docs/communication_plan_reference.md`：《通信及规划》与当前协议的对照、待冻结接口和缺口。
 - `docs/development_mainline.md`：开发进度、阻塞项和验收主线。
 - `docs/ocs_independent_test_record.md`：本次 OCS 独立功能的测试记录。
 - `docs/usv_fsm_dryrun_review.md`：T-Wave 状态机 dry-run 包的 Orin 部署审查和边界。
