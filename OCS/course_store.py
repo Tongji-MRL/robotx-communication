@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterable
+try:
+    from .course_config import validate_course_fields
+except ImportError:
+    from course_config import validate_course_fields
 
 
 @dataclass(frozen=True)
@@ -14,7 +18,7 @@ class CourseConfig:
     course_id: str
     pinger_freq_hz: int
     corners: tuple[tuple[float, float], ...]
-    sent_at: datetime
+    sent_at: datetime | None
 
 
 class CourseStore:
@@ -29,15 +33,11 @@ class CourseStore:
         course_id: str,
         pinger_freq_hz: int,
         corners: Iterable[tuple[float, float]],
-        sent_at: datetime,
+        sent_at: datetime | None,
     ) -> None:
-        if not course_id:
-            raise ValueError("course_id is required")
-        if not isinstance(pinger_freq_hz, int) or isinstance(pinger_freq_hz, bool) or pinger_freq_hz < 0:
-            raise ValueError("pinger_freq_hz must be a non-negative integer")
-        saved_corners = tuple((float(latitude), float(longitude)) for latitude, longitude in corners)
-        if not isinstance(sent_at, datetime):
-            raise ValueError("sent_at must be a datetime")
+        course_id, pinger_freq_hz, saved_corners = validate_course_fields(course_id, pinger_freq_hz, corners)
+        if sent_at is not None and not isinstance(sent_at, datetime):
+            raise ValueError("sent_at must be a datetime or null")
         self._course = CourseConfig(course_id, pinger_freq_hz, saved_corners, sent_at)
 
     def get(self) -> CourseConfig | None:

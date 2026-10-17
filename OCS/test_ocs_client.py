@@ -23,6 +23,9 @@ class OcsClientTests(unittest.TestCase):
         self.client._on_message(None, None, self.message("robocommand/robotx/course", course.SerializeToString()))
         self.assertEqual(self.client.course.course_id, "RX2026-A")
         self.assertEqual(self.client.course_store.get().course_id, "RX2026-A")
+        course_actions = self.client.drain_internal_actions()
+        self.assertEqual(course_actions[0]["kind"], "course_config")
+        self.assertEqual(course_actions[0]["payload"]["corners"][0], {"latitude": 1.0, "longitude": 2.0})
 
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
         command = rx_commands_pb2.RxCommand(
@@ -68,7 +71,7 @@ class OcsClientTests(unittest.TestCase):
             self.client.publish_heartbeat("T-Wave", latitude=1.0, longitude=2.0)
 
     def test_ocs_routes_to_usv_without_deciding_the_current_task(self) -> None:
-        course = rx_course_pb2.RxCourse(course_id="RX2026-A")
+        course = rx_course_pb2.RxCourse(course_id="RX2026-A", pinger_freq_hz=27000)
         course.corners.add(latitude=1.0, longitude=2.0)
         course.corners.add(latitude=1.0, longitude=3.0)
         course.corners.add(latitude=2.0, longitude=3.0)

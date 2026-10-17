@@ -28,7 +28,8 @@ from vehicle_protocol import command_payload, decode, encode, make_message, topi
 
 class VehicleAgent:
     def __init__(self, vehicle_id: str, broker: str, port: int = 1883,
-                 command_handler: Callable[[dict[str, Any]], tuple[bool, str]] | None = None) -> None:
+                 command_handler: Callable[[dict[str, Any]], tuple[bool, str]] | None = None,
+                 *, username: str | None = None, password: str | None = None) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
         self.vehicle_id = vehicle_id
@@ -36,10 +37,15 @@ class VehicleAgent:
         self.port = port
         self.command_handler = command_handler or self._safe_default_handler
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        if username:
+            self.client.username_pw_set(username, password)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
         self.client.on_message = self._on_message
         self._stop = threading.Event()
+        self._connected = threading.Event()
+        self._active_run_id: int | None = None
+        self.client.reconnect_delay_set(min_delay=1, max_delay=30)
 
     @staticmethod
     def _safe_default_handler(_payload: dict[str, Any]) -> tuple[bool, str]:
@@ -50,10 +56,11 @@ class VehicleAgent:
             print(f"[MQTT] connection failed: {reason_code}", file=sys.stderr)
             return
         client.subscribe(topic(self.vehicle_id, "command"), qos=1)
+        self._connected.set()
         print(f"[MQTT] vehicle agent online: {self.vehicle_id}")
 
-    @staticmethod
-    def _on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
+    def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
+        self._connected.clear()
         print(f"[MQTT] vehicle agent disconnected: {reason_code}", file=sys.stderr)
 
     def _on_message(self, _client, _userdata, message) -> None:
@@ -67,6 +74,8 @@ class VehicleAgent:
             if envelope["kind"] != "command":
                 return
             accepted, detail = self.command_handler(payload)
+            if accepted and payload.get("command") == "run_start":
+                self._active_run_id = envelope["run_id"]
             parameters = payload.get("parameters") or {}
             ack = make_message(self.vehicle_id, "ack", {
                 "in_reply_to": envelope["message_id"],
@@ -95,6 +104,10 @@ class VehicleAgent:
                        run_id: int | None = None, frame_id: str = "unknown") -> None:
         if kind not in ("heartbeat", "task_report", "fault"):
             raise ValueError(f"invalid report kind: {kind}")
+        if run_id is not None and run_id != self._active_run_id:
+            raise ValueError("refusing to publish a report for a non-active run")
+        if not self._connected.is_set() or not self.client.is_connected():
+            raise RuntimeError("internal MQTT is disconnected; report not queued as current telemetry")
         message = make_message(
             self.vehicle_id, kind, payload, run_id=run_id,
             source=self.vehicle_id, frame_id=frame_id,
@@ -103,27 +116,35 @@ class VehicleAgent:
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"report publish failed: {result.rc}")
 
-    def run(self, simulate: bool = False, heartbeat_period: float = 2.0) -> None:
+    def run(self, simulate: bool = False, heartbeat_period: float = 0.5,
+            telemetry_provider: Callable[[], dict[str, Any] | None] | None = None) -> None:
         next_heartbeat = 0.0
         while not self._stop.wait(0.1):
             now = time.monotonic()
-            if simulate and now >= next_heartbeat:
+            if now >= next_heartbeat:
                 try:
-                    vehicle_type = "uav" if "sky" in self.vehicle_id.lower() else "usv"
-                    self.publish_report("heartbeat", {
-                        "state": "AUTO",
-                        "current_task": "TASK_NONE",
+                    if simulate:
+                        vehicle_type = "uav" if "sky" in self.vehicle_id.lower() else "usv"
+                        payload = {
+                        "source_mode": "simulation", "state": "AUTO",
                         "position": {
                             "frame_id": "wgs84",
                             "latitude_deg": 1.2806142,
                             "longitude_deg": 103.8557120,
-                            "altitude_m": 0.0,
+                            "altitude_hae_m": 0.0,
                         },
-                        "speed_mps": 0.0,
-                        "heading_deg": 0.0,
+                        "speed_mps": 0.0, "heading_deg": 0.0, "roll_deg": 0.0, "pitch_deg": 0.0,
                         "vehicle_type": vehicle_type,
-                        "health": {"simulator": True},
-                    })
+                        "health": {"simulator": True, "fcu_connected": True},
+                        }
+                        if vehicle_type == "uav":
+                            payload["flight_phase"] = "grounded"
+                    else:
+                        payload = telemetry_provider() if telemetry_provider else None
+                        if payload is None:
+                            next_heartbeat = now + heartbeat_period
+                            continue
+                    self.publish_report("heartbeat", payload, run_id=self._active_run_id, frame_id="wgs84")
                 except RuntimeError as exc:
                     # Keep the agent alive while Paho reconnects after a broker outage.
                     print(f"[MQTT] heartbeat deferred: {exc}", file=sys.stderr)
@@ -140,6 +161,8 @@ def main() -> int:
     parser.add_argument("--vehicle-id", choices=("T-Sky", "T-Wave"), required=True)
     parser.add_argument("--broker", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=1883)
+    parser.add_argument("--username")
+    parser.add_argument("--password")
     parser.add_argument("--simulate", action="store_true", help="只发布模拟心跳，不连接 ROS 2 或硬件")
     parser.add_argument(
         "--accept-commands",
@@ -151,7 +174,8 @@ def main() -> int:
         (lambda _payload: (True, "simulated command accepted"))
         if args.accept_commands else None
     )
-    agent = VehicleAgent(args.vehicle_id, args.broker, args.port, command_handler)
+    agent = VehicleAgent(args.vehicle_id, args.broker, args.port, command_handler,
+                         username=args.username, password=args.password)
     try:
         agent.connect()
         agent.run(simulate=args.simulate)

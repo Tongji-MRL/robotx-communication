@@ -16,7 +16,7 @@ PROTOCOL_VERSION = "1"
 ROOT = "tongji/robotx/v1"
 VEHICLES = ("T-Sky", "T-Wave")
 KINDS = (
-    "heartbeat", "task_report", "fault", "ack", "command",
+    "heartbeat", "task_report", "fault", "ack", "command", "course_config",
 )
 COMMANDS = (
     "start_task", "pause_task", "resume_task", "stop_task", "set_mode",

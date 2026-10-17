@@ -21,6 +21,10 @@ except ImportError as exc:  # pragma: no cover
     _MQTT_IMPORT_ERROR = exc
 
 from vehicle_protocol import command_payload, decode, encode, make_message, topic, topic_filter
+try:
+    from .course_config import validate_payload
+except ImportError:
+    from course_config import validate_payload
 
 
 INTERNAL_COMMAND_TO_PROTOCOL = {
@@ -47,6 +51,7 @@ class VehicleLink:
         subscription_topic: str | None = None,
         username: str | None = None,
         password: str | None = None,
+        on_connect: Callable[[], None] | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
@@ -54,6 +59,7 @@ class VehicleLink:
         self.on_message = on_message
         self.command_topic = command_topic or topic("T-Wave", "command")
         self.subscription_topic = subscription_topic or f"tongji/robotx/v1/{vehicle_id or '+'}/+"
+        self.on_connect = on_connect
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
@@ -69,6 +75,8 @@ class VehicleLink:
             return
         client.subscribe(self.subscription_topic, qos=1)
         print(f"[MQTT] connected; observing {self.subscription_topic}")
+        if self.on_connect is not None:
+            self.on_connect()
 
     @staticmethod
     def _on_disconnect(_client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
@@ -77,7 +85,12 @@ class VehicleLink:
     def _on_message(self, _client, _userdata, message) -> None:
         try:
             value = decode(message.payload)
-            print(f"[RxVehicle] {message.topic}\n{json.dumps(value, ensure_ascii=False, indent=2)}")
+            # Heartbeats arrive at 2 Hz per vehicle; do not dump full JSON at
+            # that rate. Other report kinds remain fully traceable.
+            if value.get("kind") == "heartbeat":
+                print(f"[RxVehicle] heartbeat vehicle={value.get('vehicle_id')} id={value.get('message_id')}")
+            else:
+                print(f"[RxVehicle] {message.topic}\n{json.dumps(value, ensure_ascii=False, indent=2)}")
             if self.on_message is not None:
                 self.on_message(value)
         except Exception as exc:  # keep the internal MQTT loop alive on bad reports
@@ -142,6 +155,19 @@ class VehicleLink:
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
             raise RuntimeError(f"command publish failed: {result.rc}")
         print(f"[TxCommand] {message['message_id']} -> {mqtt_topic}")
+
+    def send_course_config(self, action: dict) -> None:
+        """Publish frozen Course data; it is not a command and never has a run_id."""
+        if action.get("kind") != "course_config" or action.get("vehicle_id") != "T-Wave":
+            raise ValueError("course_config may only target T-Wave")
+        payload = validate_payload(action.get("payload", {}))
+        message = make_message("T-Wave", "course_config", payload, run_id=None, source="ocs")
+        mqtt_topic = topic("T-Wave", "course_config")
+        result = self.client.publish(mqtt_topic, encode(message), qos=1, retain=True)
+        result.wait_for_publish()
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            raise RuntimeError(f"course_config publish failed: {result.rc}")
+        print(f"[TxCourseConfig] {message['message_id']} -> {mqtt_topic}")
 
     def close(self) -> None:
         self.client.loop_stop()

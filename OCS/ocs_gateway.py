@@ -54,11 +54,13 @@ class OcsGateway:
             subscription_topic=internal_subscription_topic,
             username=internal_username,
             password=internal_password,
+            on_connect=self.ocs.queue_course_sync,
         )
 
     def connect(self) -> None:
         self.ocs.connect()
         self.vehicle_link.connect()
+        self.ocs.queue_course_sync()
 
     def publish_declaration(
         self,
@@ -74,12 +76,19 @@ class OcsGateway:
                 raise ValueError(
                     "OCS gateway refuses to send a command directly to a non-USV vehicle"
                 )
-            self.vehicle_link.send_action(action)
+            if action.get("kind") == "course_config":
+                self.vehicle_link.send_course_config(action)
+            else:
+                self.vehicle_link.send_action(action)
 
     def run(self, duration: float = 0.0) -> None:
         deadline = time.monotonic() + duration if duration else None
+        next_heartbeat = time.monotonic()
         while deadline is None or time.monotonic() < deadline:
             self.flush_commands()
+            if time.monotonic() >= next_heartbeat:
+                self.ocs.publish_cached_heartbeats()
+                next_heartbeat = time.monotonic() + 0.5
             time.sleep(0.1)
 
     def close(self) -> None:
@@ -89,7 +98,7 @@ class OcsGateway:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="OCS official RoboCommand ↔ USV coordinator gateway"
+        description="OCS official RoboCommand to USV coordinator gateway"
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--official-broker", help="computer B official broker")

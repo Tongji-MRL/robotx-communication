@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import queue
 from pathlib import Path
 
 import paho.mqtt.client as mqtt
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 from OCS import vehicle_protocol
@@ -31,6 +33,7 @@ class TWaveMqttRuntimeNode(Node):
         self.declare_parameter("mqtt_username", "")
         self.declare_parameter("mqtt_password", "")
         self.declare_parameter("command_topic", vehicle_protocol.topic("T-Wave", "command"))
+        self.declare_parameter("course_topic", vehicle_protocol.topic("T-Wave", "course_config"))
         self.declare_parameter("ack_topic", vehicle_protocol.topic("T-Wave", "ack"))
         self.declare_parameter("task_report_topic", vehicle_protocol.topic("T-Wave", "task_report"))
         self.declare_parameter("fault_topic", vehicle_protocol.topic("T-Wave", "fault"))
@@ -43,6 +46,11 @@ class TWaveMqttRuntimeNode(Node):
             name: self.create_publisher(String, f"{MISSION_BASE}/{name}", 10)
             for name in ("run_start", "task4_cmd")
         }
+        self._course_publisher = self.create_publisher(
+            String, f"{MISSION_BASE}/course_config",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self.create_subscription(String, f"{MISSION_BASE}/status", self._status, 10)
         self.create_subscription(String, f"{MISSION_BASE}/task_report", self._task_report, 10)
         self.create_subscription(String, f"{MISSION_BASE}/fault", self._fault, 10)
@@ -55,6 +63,7 @@ class TWaveMqttRuntimeNode(Node):
                 "task_report": str(self.get_parameter("task_report_topic").value),
                 "fault": str(self.get_parameter("fault_topic").value),
             },
+            publish_course=self._publish_course,
         )
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
@@ -76,7 +85,8 @@ class TWaveMqttRuntimeNode(Node):
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
         if reason_code == 0:
             client.subscribe(self.runtime.command_topic, qos=1)
-            self.get_logger().info("connected to internal MQTT; subscribed to T-Wave commands")
+            client.subscribe(self.runtime.course_topic, qos=1)
+            self.get_logger().info("connected to internal MQTT; subscribed to T-Wave commands and Course")
         else:
             self.get_logger().error(f"MQTT connection failed: {reason_code}")
 
@@ -104,6 +114,12 @@ class TWaveMqttRuntimeNode(Node):
             raise ValueError(f"unexpected mission command output: {name}")
         msg = String(); msg.data = encode(payload)
         self._mission_commands[name].publish(msg)
+
+    def _publish_course(self, payload: dict) -> None:
+        # This is data-only ingress.  It is deliberately not routed through
+        # MissionBridge or any Task/actuator command path.
+        msg = String(); msg.data = json.dumps(payload, separators=(",", ":"))
+        self._course_publisher.publish(msg)
 
     def _status(self, msg: String) -> None:
         self._report("status", msg)

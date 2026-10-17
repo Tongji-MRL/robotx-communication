@@ -1,6 +1,7 @@
 import sys
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -8,6 +9,7 @@ CORE_ROOT = PACKAGE_ROOT.parents[2] / "usv_main_fsm"
 sys.path[:0] = [str(PACKAGE_ROOT), str(CORE_ROOT.parent)]
 
 from OCS import vehicle_protocol
+from OCS.course_config import make_payload
 from twave_mission_dryrun.bridge import MissionBridge
 from twave_mission_dryrun.mqtt_runtime import TWaveMqttRuntime
 from twave_mission_dryrun.protocol import encode
@@ -15,13 +17,14 @@ from twave_mission_dryrun.protocol import encode
 
 class TWaveMqttRuntimeTests(unittest.TestCase):
     def setUp(self):
-        self.mqtt, self.controls = [], []
+        self.mqtt, self.controls, self.courses = [], [], []
         self.checkpoint = Path.cwd() / f".mqtt-runtime-{uuid.uuid4().hex}.json"
         self.now = 2_000_000
         self.runtime = TWaveMqttRuntime(
             self.checkpoint, lambda topic, raw: self.mqtt.append((topic, raw)),
             lambda name, payload: self.controls.append((name, payload)),
             now_ms=lambda: self.now,
+            publish_course=self.courses.append,
         )
 
     def tearDown(self):
@@ -96,6 +99,27 @@ class TWaveMqttRuntimeTests(unittest.TestCase):
         ack = self.command("task4_assistance", seq=2)
         self.assertTrue(ack["payload"]["accepted"])
         self.assertEqual(self.controls[-1][0], "task4_cmd")
+
+    def test_course_is_idempotent_versioned_and_never_creates_a_task_command(self):
+        def send(payload, message_id):
+            message = vehicle_protocol.make_message("T-Wave", "course_config", payload,
+                                                    run_id=None, source="ocs", message_id=message_id)
+            self.runtime.receive(vehicle_protocol.topic("T-Wave", "course_config"), vehicle_protocol.encode(message))
+        first = make_payload(course_id="RX2026-A", pinger_freq_hz=27000,
+                             corners=[(1, 2), (1, 3), (2, 3), (1, 2)],
+                             source_sent_at=datetime(2026, 10, 17, 3, tzinfo=timezone.utc))
+        send(first, "course-1")
+        send(first, "course-duplicate")
+        self.assertEqual(self.courses, [first])
+        self.assertEqual(self.controls, [])
+        older = dict(first); older["source_sent_at"] = "2026-10-17T02:00:00.000Z"
+        older["pinger_freq_hz"] = 28000
+        with self.assertRaisesRegex(ValueError, "old Course"):
+            send(older, "course-old")
+        newer = dict(first); newer["source_sent_at"] = "2026-10-17T04:00:00.000Z"
+        newer["pinger_freq_hz"] = 28000
+        send(newer, "course-new")
+        self.assertEqual(self.courses[-1]["pinger_freq_hz"], 28000)
 
 
 if __name__ == "__main__":

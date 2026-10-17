@@ -8,18 +8,21 @@ only to the existing FakeUSVExecutor test topic.
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from OCS import vehicle_protocol
+from OCS.course_config import fingerprint as course_fingerprint, validate_payload as validate_course_payload
 
 from .protocol import envelope as dryrun_envelope
 
 
 PublishMqtt = Callable[[str, bytes], None]
 PublishDryRun = Callable[[str, dict[str, Any]], None]
+PublishCourse = Callable[[dict[str, Any]], None]
 
 
 class TWaveMqttRuntime:
@@ -42,6 +45,7 @@ class TWaveMqttRuntime:
         now_ms: Callable[[], int] | None = None,
         command_topic: str | None = None,
         outbound_topics: dict[str, str] | None = None,
+        publish_course: PublishCourse | None = None,
     ) -> None:
         if max_message_age_seconds <= 0:
             raise ValueError("max_message_age_seconds must be positive")
@@ -50,6 +54,8 @@ class TWaveMqttRuntime:
         self.max_message_age_ms = int(max_message_age_seconds * 1000)
         self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.command_topic = command_topic or vehicle_protocol.topic("T-Wave", "command")
+        self.course_topic = vehicle_protocol.topic("T-Wave", "course_config")
+        self.publish_course = publish_course or (lambda _payload: None)
         self.outbound_topics = outbound_topics or {
             kind: vehicle_protocol.topic("T-Wave", kind)
             for kind in ("ack", "task_report", "fault")
@@ -65,6 +71,9 @@ class TWaveMqttRuntime:
         self._last_command_seq = 0
         self._latest_run_id = 0
         self._active_run_id: int | None = None
+        self._course_fingerprint: str | None = None
+        self._course_source_sent_at: datetime | None = None
+        self._course_id: str | None = None
 
     def receive(self, mqtt_topic: str, raw: bytes | str) -> None:
         """Process one OCS MQTT command and always return a protocol ACK.
@@ -74,6 +83,9 @@ class TWaveMqttRuntime:
         callback, which logs the error and keeps the connection alive.
         """
         envelope = vehicle_protocol.decode(raw)
+        if mqtt_topic == self.course_topic:
+            self._receive_course(envelope)
+            return
         self._validate_envelope(mqtt_topic, envelope)
         message_id = str(envelope["message_id"])
         if message_id in self._seen_ids:
@@ -104,6 +116,30 @@ class TWaveMqttRuntime:
             response = self._ack(envelope, True, "ACCEPTED", "forwarded to dry-run MissionBridge")
         self._responses[message_id] = response
         self._publish(response)
+
+    def _receive_course(self, message: dict[str, Any]) -> None:
+        """Validate and relay Course only; it cannot cause a task/control action."""
+        if message["vehicle_id"] != "T-Wave" or message["kind"] != "course_config":
+            raise ValueError("only T-Wave course_config envelopes are accepted")
+        if message["source"] != "ocs" or message["run_id"] is not None:
+            raise ValueError("course_config must be pre-run data from trusted ocs")
+        payload = validate_course_payload(message["payload"])
+        identity = course_fingerprint(payload)
+        if identity == self._course_fingerprint:
+            return
+        source_text = payload["source_sent_at"]
+        source_time = datetime.fromisoformat(source_text.replace("Z", "+00:00")) if source_text else None
+        if self._course_source_sent_at is not None:
+            if source_time is None:
+                raise ValueError("unversioned Course update rejected after a versioned Course")
+            if source_time <= self._course_source_sent_at:
+                raise ValueError("old Course version rejected")
+        elif self._course_id == payload["course_id"] and self._course_fingerprint is not None and source_time is None:
+            raise ValueError("Course update without source_sent_at requires a new course_id")
+        self._course_fingerprint = identity
+        self._course_source_sent_at = source_time
+        self._course_id = payload["course_id"]
+        self.publish_course(payload)
 
     def _validate_envelope(self, mqtt_topic: str, message: dict[str, Any]) -> None:
         if mqtt_topic != self.command_topic:

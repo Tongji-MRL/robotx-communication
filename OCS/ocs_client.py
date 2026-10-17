@@ -14,14 +14,16 @@ import argparse
 import json
 import sys
 import time
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 try:
     from .course_store import CourseStore
+    from .course_config import make_payload, fingerprint
 except ImportError:  # Script/test execution directly from the OCS directory.
     from course_store import CourseStore
+    from course_config import make_payload, fingerprint
 
 try:
     import paho.mqtt.client as mqtt
@@ -32,6 +34,10 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
 
 from google.protobuf.text_format import MessageToString
 from google.protobuf.timestamp_pb2 import Timestamp
+try:
+    from .heartbeat_cache import HeartbeatCache, HeartbeatRejected
+except ImportError:
+    from heartbeat_cache import HeartbeatCache, HeartbeatRejected
 
 # The official generated Python modules live beside this OCS directory.
 HERE = Path(__file__).resolve().parent
@@ -151,6 +157,7 @@ class OcsClient:
         self.run_id: int | None = None
         self.course: rx_course_pb2.RxCourse | None = None
         self.course_store = CourseStore()
+        self._course_fingerprint: str | None = None
         self.last_rejection_reason: str | None = None
         self.last_command: rx_commands_pb2.RxCommand | None = None
         self._last_command_seq = 0
@@ -159,6 +166,8 @@ class OcsClient:
         # protocol boundaries; vehicle_link.py is the internal MQTT adapter.
         self._pending_internal_actions: list[dict] = []
         self._relayed_official_commands: dict[int, str] = {}
+        self.heartbeat_cache = HeartbeatCache()
+        self._authoritative_current_task: dict[str, str] = {}
         self.connected = False
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
@@ -217,25 +226,53 @@ class OcsClient:
 
     @staticmethod
     def _validate_course(course: rx_course_pb2.RxCourse) -> None:
-        if not course.course_id:
-            raise ValueError("RxCourse.course_id must not be empty")
-        if len(course.corners) < 4:
-            raise ValueError("RxCourse must contain a closed boundary")
-        first = course.corners[0]
-        last = course.corners[-1]
-        if first != last:
-            raise ValueError("RxCourse boundary must be closed")
+        # make_payload performs the frozen range and polygon validation.
+        make_payload(
+            course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
+            corners=((item.latitude, item.longitude) for item in course.corners),
+            source_sent_at=course.sent_at.ToDatetime(tzinfo=timezone.utc)
+            if (course.sent_at.seconds or course.sent_at.nanos) else None,
+        )
 
     def _accept_course(self, course: rx_course_pb2.RxCourse) -> None:
         self._validate_course(course)
+        source_sent_at = course.sent_at.ToDatetime(tzinfo=timezone.utc) if (course.sent_at.seconds or course.sent_at.nanos) else None
+        payload = make_payload(
+            course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
+            corners=((item.latitude, item.longitude) for item in course.corners),
+            source_sent_at=source_sent_at,
+        )
+        new_fingerprint = fingerprint(payload)
         self.course = rx_course_pb2.RxCourse()
         self.course.CopyFrom(course)
         self.course_store.update(
             course_id=course.course_id,
             pinger_freq_hz=course.pinger_freq_hz,
             corners=((corner.latitude, corner.longitude) for corner in course.corners),
-            sent_at=course.sent_at.ToDatetime(tzinfo=timezone.utc),
+            sent_at=source_sent_at,
         )
+        if new_fingerprint != self._course_fingerprint:
+            self._course_fingerprint = new_fingerprint
+            self._queue_internal_action({
+                "kind": "course_config", "vehicle_id": self.mission_coordinator,
+                "payload": payload,
+            })
+
+    def queue_course_sync(self) -> None:
+        """Queue the latest valid Course after an internal-link reconnect.
+
+        This is transport synchronization only, not an FSM-applied acknowledgement.
+        """
+        course = self.course_store.get()
+        if course is None:
+            return
+        self._queue_internal_action({
+            "kind": "course_config", "vehicle_id": self.mission_coordinator,
+            "payload": make_payload(
+                course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
+                corners=course.corners, source_sent_at=course.sent_at,
+            ),
+        })
 
     def _accept_command(self, command: rx_commands_pb2.RxCommand) -> None:
         if command.team_id != self.team_id:
@@ -344,6 +381,8 @@ class OcsClient:
         vehicle_id = str(envelope.get("vehicle_id", ""))
         if vehicle_id not in self._declared_vehicle_ids:
             raise ValueError(f"vehicle_id {vehicle_id!r} was not declared for this run")
+        if envelope.get("source") != vehicle_id:
+            raise ValueError("vehicle envelope source must match vehicle_id")
         message_run_id = envelope.get("run_id")
         if self.run_id is not None and message_run_id not in (None, self.run_id):
             print(
@@ -355,7 +394,7 @@ class OcsClient:
         kind = envelope.get("kind")
         payload = envelope.get("payload") or {}
         if kind == "heartbeat":
-            self._accept_vehicle_heartbeat(vehicle_id, payload)
+            self._accept_vehicle_heartbeat(envelope)
         elif kind == "ack":
             if payload.get("command_seq") is None:
                 raise ValueError("vehicle ACK requires command_seq")
@@ -373,27 +412,42 @@ class OcsClient:
         elif kind != "command":
             raise ValueError(f"unsupported vehicle message kind: {kind}")
 
-    def _accept_vehicle_heartbeat(self, vehicle_id: str, payload: Mapping) -> None:
-        position = payload.get("position") or {}
-        if "latitude_deg" not in position or "longitude_deg" not in position:
-            raise ValueError("heartbeat.position requires latitude_deg/longitude_deg")
-        self.publish_heartbeat(
-            vehicle_id,
-            state=str(payload.get("state", "unknown")).lower(),
-            latitude=float(position["latitude_deg"]),
-            longitude=float(position["longitude_deg"]),
-            speed_mps=float(payload.get("speed_mps") or 0.0),
-            heading_deg=float(payload.get("heading_deg") or 0.0),
-            vehicle_type=str(payload.get("vehicle_type") or (
-                "uav" if "sky" in vehicle_id.lower() else "usv"
-            )).lower(),
-            current_task=str(payload.get("current_task") or "none").lower(),
-            roll_deg=float(payload.get("roll_deg") or 0.0),
-            pitch_deg=float(payload.get("pitch_deg") or 0.0),
-            altitude_hae_m=float(position.get("altitude_m") or 0.0),
-            depth_m=float(payload.get("depth_m") or 0.0),
-            flight_phase=str(payload.get("flight_phase") or "unknown").lower(),
-        )
+    def set_authoritative_current_task(self, vehicle_id: str, current_task: str | None) -> None:
+        """Set task state only from a confirmed MissionCoordinator contract."""
+        self._check_vehicle(vehicle_id)
+        if current_task is None:
+            self._authoritative_current_task.pop(vehicle_id, None)
+            return
+        _enum(current_task, TASK_MAP, "current_task")
+        self._authoritative_current_task[vehicle_id] = current_task
+
+    def _accept_vehicle_heartbeat(self, envelope: Mapping) -> None:
+        try:
+            self.heartbeat_cache.accept(envelope, active_run_id=self.run_id)
+        except HeartbeatRejected as exc:
+            print(f"[VehicleHeartbeat] rejected {envelope.get('vehicle_id')}: {exc}", file=sys.stderr)
+
+    def publish_cached_heartbeats(self) -> int:
+        """Publish fresh telemetry at the gateway's 2 Hz timer cadence."""
+        count = 0
+        for vehicle_id in sorted(self._declared_vehicle_ids):
+            entry = self.heartbeat_cache.valid(vehicle_id, active_run_id=self.run_id)
+            if entry is None:
+                continue
+            payload, position = entry.payload, entry.payload["position"]
+            self.publish_heartbeat(
+                vehicle_id, state=payload["state"],
+                latitude=float(position["latitude_deg"]), longitude=float(position["longitude_deg"]),
+                speed_mps=float(payload["speed_mps"]), heading_deg=float(payload["heading_deg"]),
+                vehicle_type=str(payload["vehicle_type"]),
+                current_task=self._authoritative_current_task.get(vehicle_id, "unknown"),
+                roll_deg=float(payload["roll_deg"]), pitch_deg=float(payload["pitch_deg"]),
+                altitude_hae_m=float(position["altitude_hae_m"]),
+                depth_m=float(payload.get("depth_m", 0.0)),
+                flight_phase=str(payload.get("flight_phase", "unknown")),
+            )
+            count += 1
+        return count
 
     def accept_vehicle_task_report(self, vehicle_id: str, payload: Mapping) -> None:
         """Publish an explicitly supplied official report.
@@ -563,6 +617,8 @@ class OcsClient:
         self.last_command = None
         self._last_command_seq = 0
         self._report_seq.clear()
+        self.heartbeat_cache = HeartbeatCache()
+        self._authoritative_current_task.clear()
         self._pending_internal_actions.clear()
         self._relayed_official_commands.clear()
         self._team_seq += 1
