@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OCS · Vehicle Monitor</title>
+  <style>
+    :root { --bg:#09111f; --panel:#101d31; --panel2:#14243c; --line:#253954; --text:#e8f0fb; --muted:#8da2bc; --cyan:#56d7e8; --green:#5de0a6; --amber:#ffc857; --red:#ff6b7a; --shadow:0 18px 55px #0005; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:var(--text); background:radial-gradient(circle at 80% -10%,#173a58 0,#09111f 45%); font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    button,select,textarea { font:inherit; }
+    .shell { max-width:1500px; margin:auto; padding:28px 30px 38px; }
+    .top { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:28px; }
+    .brand { display:flex; align-items:center; gap:14px; }
+    .mark { width:42px; height:42px; display:grid; place-items:center; border-radius:13px; color:#06131e; background:linear-gradient(135deg,var(--cyan),#8aa8ff); font-weight:900; box-shadow:0 8px 24px #56d7e833; }
+    h1,h2,h3,p { margin:0; } h1 { font-size:22px; letter-spacing:-.02em; } h2 { font-size:15px; } h3 { font-size:13px; color:var(--muted); font-weight:600; }
+    .sub { color:var(--muted); margin-top:3px; }
+    .connection { display:flex; align-items:center; gap:9px; padding:9px 13px; border:1px solid var(--line); border-radius:999px; color:var(--muted); background:#0d192a99; }
+    .dot { width:9px; height:9px; border-radius:50%; background:var(--red); box-shadow:0 0 14px currentColor; } .dot.on { background:var(--green); color:var(--green); } .dot.warn { background:var(--amber); color:var(--amber); }
+    .grid { display:grid; grid-template-columns:minmax(0,1fr) 350px; gap:18px; align-items:start; }
+    .panel { background:linear-gradient(160deg,#12213aee,#0e192b); border:1px solid var(--line); border-radius:18px; box-shadow:var(--shadow); }
+    .panel-head { display:flex; align-items:center; justify-content:space-between; padding:18px 20px; border-bottom:1px solid var(--line); }
+    .vehicles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .vehicle { padding:18px; border:1px solid var(--line); border-radius:16px; background:#0d192a; }
+    .vehicle-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:19px; }
+    .vehicle-name { display:flex; align-items:center; gap:10px; font-size:18px; font-weight:700; } .vehicle-icon { color:var(--cyan); }
+    .state { padding:5px 9px; border-radius:999px; font-size:12px; color:var(--muted); background:#1a2b43; } .state.ok { color:#8ff0c5; background:#113e38; } .state.bad { color:#ffacb6; background:#4b1e31; }
+    .metric-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; } .metric { min-height:64px; padding:11px 12px; border-radius:12px; background:#14243a; } .metric small { display:block; color:var(--muted); font-size:11px; margin-bottom:4px; } .metric strong { font-size:15px; font-weight:650; }
+    .wide { grid-column:1/-1; } .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+    .main-panel { padding:0 20px 20px; } .course { padding:15px 0; display:flex; gap:26px; color:var(--muted); } .course strong { color:var(--text); margin-left:5px; }
+    .controls { padding:0 20px 20px; } label { display:block; color:var(--muted); font-size:12px; margin:14px 0 6px; } select,textarea { width:100%; border:1px solid var(--line); color:var(--text); background:#0a1525; border-radius:10px; padding:10px 11px; outline:none; } textarea { min-height:92px; resize:vertical; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; } select:focus,textarea:focus { border-color:var(--cyan); }
+    .button-row { display:flex; gap:9px; margin-top:14px; } button { border:0; border-radius:10px; padding:10px 13px; color:#07131d; background:var(--cyan); cursor:pointer; font-weight:700; } button:hover { filter:brightness(1.08); } button.secondary { color:var(--text); background:#203552; } button.danger { color:#fff; background:#b83d59; } button:disabled { cursor:not-allowed; opacity:.5; }
+    .warning { margin-top:14px; padding:11px 12px; border-left:3px solid var(--amber); color:#d9c997; background:#332b18; border-radius:8px; font-size:12px; }
+    .log-panel { margin-top:18px; } .log { max-height:360px; overflow:auto; } .log-row { display:grid; grid-template-columns:72px 76px 1fr; gap:10px; padding:10px 20px; border-bottom:1px solid #1a2a40; align-items:start; } .log-row:last-child { border-bottom:0; } .log-time { color:var(--muted); font-family:ui-monospace,monospace; font-size:11px; } .tag { width:max-content; padding:2px 7px; border-radius:6px; font-size:11px; background:#213550; color:#a8c3e0; } .tag.out { color:#9df1dd; background:#123a39; } .tag.error { color:#ffafb9; background:#4b1e31; } .log-title { font-weight:650; } .log-topic { color:var(--muted); font-size:11px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .empty { padding:28px 20px; color:var(--muted); text-align:center; }
+    .toast { position:fixed; right:24px; bottom:24px; max-width:360px; padding:12px 15px; border:1px solid var(--line); border-radius:12px; background:#14243cf5; box-shadow:var(--shadow); opacity:0; transform:translateY(12px); transition:.2s; pointer-events:none; } .toast.show { opacity:1; transform:none; }
+    @media (max-width:900px) { .shell { padding:20px 14px 30px; } .grid { grid-template-columns:1fr; } .vehicles { grid-template-columns:1fr; } .connection { font-size:12px; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="top">
+      <div class="brand"><div class="mark">OCS</div><div><h1>Vehicle Monitor</h1><p class="sub">TONG · 内部通信监控台</p></div></div>
+      <div class="connection"><span id="broker-dot" class="dot"></span><span id="broker-text">等待 MQTT</span></div>
+    </header>
+    <div class="grid">
+      <section>
+        <div class="panel main-panel">
+          <div class="panel-head" style="padding-left:0;padding-right:0"><div><h2>车辆状态</h2><p class="sub">仅显示 OCS 收到的标准化心跳和报告</p></div><span class="mono" id="updated">--</span></div>
+          <div class="course"><span>Course <strong id="course-id">未收到</strong></span><span>Pinger <strong id="pinger">--</strong></span><span>运行时长 <strong id="uptime">--</strong></span></div>
+          <div id="vehicles" class="vehicles"></div>
+        </div>
+        <div class="panel log-panel"><div class="panel-head"><div><h2>通信时间线</h2><p class="sub">最近收到和发送的内部消息</p></div><button class="secondary" onclick="refresh()">刷新</button></div><div id="log" class="log"></div></div>
+      </section>
+      <aside class="panel"><div class="panel-head"><div><h2>USV 联调控制</h2><p class="sub">T-Wave · 仅内部 MQTT</p></div></div><div class="controls">
+        <label for="command">命令</label><select id="command"><option value="ping">PING（连通性）</option><option value="safe_stop">SAFE_STOP（安全停止）</option><option value="task4_assistance">Task4 Assistance</option><option value="task4_keep_out_zone">Task4 Keep Out</option><option value="task4_all_clear">Task4 All Clear</option><option value="task4_moving_object">Task4 Moving Object</option><option value="task4_readiness_confirm">Task4 Readiness Confirm</option><option value="task4_resume">Task4 Resume</option></select>
+        <label for="run-id">Run ID（可选）</label><input id="run-id" type="number" min="1" placeholder="留空表示不指定" style="width:100%;border:1px solid var(--line);color:var(--text);background:#0a1525;border-radius:10px;padding:10px 11px;outline:none">
+        <label for="parameters">parameters JSON（可选）</label><textarea id="parameters" placeholder='例如：{"reason":"lab-test"}'></textarea>
+        <div class="button-row"><button onclick="sendCommand()">发送到 USV</button><button class="danger" onclick="sendStop()">SAFE_STOP</button></div>
+        <div class="warning">这不是官方 RoboCommand 控制台。Task4 正式命令仍必须由 OCS 官方链路接收后转发；此处仅用于实验室通信联调。UI 不向 UAV 直接发命令。</div>
+      </div></aside>
+    </div>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script>
+    const esc = value => String(value ?? '--').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const fmtTime = ms => ms ? new Date(ms).toLocaleTimeString('zh-CN',{hour12:false}) : '--';
+    const jsonText = value => value == null ? '--' : esc(JSON.stringify(value));
+    function vehicleCard(v) {
+      const hb = v.heartbeat || {}; const pos = hb.position || {}; const online = v.online;
+      return `<article class="vehicle"><div class="vehicle-head"><div class="vehicle-name"><span class="vehicle-icon">●</span>${esc(v.vehicle_id)}</div><span class="state ${online?'ok':'bad'}">${esc(v.status)}</span></div><div class="metric-grid"><div class="metric"><small>模式</small><strong>${esc(hb.state || '--')}</strong></div><div class="metric"><small>当前任务</small><strong>${esc(hb.current_task || '--')}</strong></div><div class="metric"><small>来源</small><strong>${esc(hb.source_mode || '--')}</strong></div><div class="metric"><small>位置</small><strong class="mono">${pos.latitude_deg == null ? '--' : `${Number(pos.latitude_deg).toFixed(5)}, ${Number(pos.longitude_deg).toFixed(5)}`}</strong></div><div class="metric"><small>速度 / 航向</small><strong>${hb.speed_mps == null ? '--' : `${Number(hb.speed_mps).toFixed(1)} m/s · ${Number(hb.heading_deg||0).toFixed(0)}°`}</strong></div><div class="metric"><small>最后心跳</small><strong>${v.heartbeat_age_s == null ? '--' : `${v.heartbeat_age_s.toFixed(1)}s 前`}</strong></div><div class="metric wide"><small>最近 ACK / 故障</small><strong class="mono">${v.last_fault ? `故障 ${jsonText(v.last_fault)}` : v.last_ack ? jsonText(v.last_ack) : '暂无'}</strong></div></div></article>`;
+    }
+    function logRow(row) { const cls = row.direction === 'out' ? 'out' : row.direction === 'error' ? 'error' : ''; return `<div class="log-row"><span class="log-time">${fmtTime(row.received_at_unix_ms)}</span><span class="tag ${cls}">${esc(row.direction)}</span><div><div class="log-title">${esc(row.title)}</div><div class="log-topic">${esc(row.data?.topic || row.data?.message?.payload?.command || '')}</div></div></div>`; }
+    async function refresh() { try { const response = await fetch('/api/state',{cache:'no-store'}); const s = await response.json(); const b=s.broker||{}; document.getElementById('broker-dot').className=`dot ${b.connected?'on':''}`; document.getElementById('broker-text').textContent=b.connected?`${b.host}:${b.port}`:(b.last_event||'MQTT 未连接'); document.getElementById('updated').textContent=fmtTime(s.now_unix_ms); document.getElementById('uptime').textContent=`${s.uptime_s}s`; document.getElementById('course-id').textContent=s.course?.course_id||'未收到'; document.getElementById('pinger').textContent=s.course?.pinger_freq_hz?`${s.course.pinger_freq_hz} Hz`:'--'; document.getElementById('vehicles').innerHTML=Object.values(s.vehicles||{}).map(vehicleCard).join(''); document.getElementById('log').innerHTML=s.messages?.length?s.messages.slice(0,80).map(logRow).join(''):'<div class="empty">尚未收到内部消息</div>'; } catch (e) { toast('无法读取 UI 服务：'+e.message); } }
+    async function sendCommand(commandOverride) { const command=commandOverride||document.getElementById('command').value; let parameters={}; try { const text=document.getElementById('parameters').value.trim(); if(text) parameters=JSON.parse(text); } catch(e) { toast('parameters 不是合法 JSON'); return; } const runText=document.getElementById('run-id').value; const body={command,parameters}; if(runText) body.run_id=Number(runText); if(command==='safe_stop') body.confirm=true; try { const response=await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const result=await response.json(); if(!result.ok) throw new Error(result.error); toast('已发送到 T-Wave：'+command); refresh(); } catch(e) { toast('发送失败：'+e.message); } }
+    function sendStop() { if(confirm('确认向 T-Wave 发送 SAFE_STOP？这会触发车辆侧安全停止流程。')) sendCommand('safe_stop'); }
+    function toast(message) { const el=document.getElementById('toast'); el.textContent=message; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),3200); }
+    refresh(); setInterval(refresh,1000);
+  </script>
+</body>
+</html>
