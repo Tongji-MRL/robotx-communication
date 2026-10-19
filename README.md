@@ -29,6 +29,7 @@
 - `OCS/fsm_protocol.py`：UAV↔USV 状态机直连 JSON 协议和校验。
 - `OCS/fsm_link.py`：UAV/USV 状态机 MQTT 通信骨架，不连接执行器。
 - `OCS/monitor_ui.py`：电脑 A 本地 OCS 通信监控 UI，只观察两车并向 USV 发送受控联调命令。
+- `OCS/ui/README.md`：监控 UI 的启动方法、页面展示、远程端口转发和安全边界。
 - `OCS/task_priority_manager.py`：USV 任务协调器的参考状态机，不由 OCS 调用。
 - `docs/usv_task_coordinator_deployment.md`：参考状态机在 USV-Orin 上的部署边界和适配清单。
 - `docs/usv_ros2_interfaces.md`：USV-Orin 已发现 Topic、可用程度、缺口和交付验收条件。

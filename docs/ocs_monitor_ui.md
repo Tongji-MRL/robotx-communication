@@ -3,6 +3,8 @@
 `OCS/monitor_ui.py` 提供一个本地 Web 监控台，用于在电脑 A 上观察 OCS 内部 MQTT
 链路。它不是官方 RoboCommand 客户端，也不替代 `ocs_gateway.py`。
 
+具体启动步骤、远程 Ubuntu 端口转发和界面各区域说明见 [`OCS/ui/README.md`](../OCS/ui/README.md)。
+
 ## 能做什么
 
 - 显示 T-Wave（USV）和 T-Sky（UAV）的最近心跳、在线/超时状态、模式、当前任务、位置、速度和健康信息；
