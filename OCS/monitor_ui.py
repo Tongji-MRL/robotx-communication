@@ -168,30 +168,70 @@ class MonitorState:
 class MqttMonitor:
     def __init__(self, state: MonitorState, host: str, port: int, username: str | None = None,
                  password: str | None = None) -> None:
-        if mqtt is None:
-            raise RuntimeError("未安装 paho-mqtt，请先安装 OCS/requirements.txt")
         self.state = state
         self.host = host
         self.port = port
-        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        if username:
+        self.client = None
+        if mqtt is not None:
+            self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        else:
+            self.state.broker_event(
+                connected=False,
+                host=host,
+                port=port,
+                event="未安装 paho-mqtt，当前为离线界面",
+            )
+        if username and self.client is not None:
             self.client.username_pw_set(username, password)
-        self.client.on_connect = self._on_connect
-        self.client.on_disconnect = self._on_disconnect
-        self.client.on_message = self._on_message
+        if self.client is not None:
+            self.client.on_connect = self._on_connect
+            self.client.on_disconnect = self._on_disconnect
+            self.client.on_message = self._on_message
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        self.client.connect(self.host, self.port, keepalive=60)
-        self.client.loop_start()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._connect_loop, name="ocs-ui-mqtt", daemon=True)
+        self._thread.start()
 
     def stop(self) -> None:
+        self._stop.set()
+        if self.client is None:
+            return
         self.client.loop_stop()
-        self.client.disconnect()
+        if self.client.is_connected():
+            self.client.disconnect()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def _connect_loop(self) -> None:
+        """Keep the web UI available while the internal broker is offline."""
+        if self.client is None:
+            return
+        while not self._stop.is_set():
+            if not self.client.is_connected():
+                try:
+                    self.client.connect(self.host, self.port, keepalive=60)
+                    self.client.loop_start()
+                    # on_connect updates the visible broker state.
+                except Exception as exc:
+                    self.state.broker_event(
+                        connected=False,
+                        host=self.host,
+                        port=self.port,
+                        event=f"等待 MQTT：{exc}",
+                    )
+                    self._stop.wait(3.0)
+                    continue
+            self._stop.wait(1.0)
 
     def send_command(self, command: str, *, parameters: Mapping[str, Any] | None = None,
                      run_id: int | None = None) -> dict[str, Any]:
         if command not in UI_COMMANDS:
             raise ValueError(f"UI 不允许发送命令: {command}")
+        if self.client is None:
+            raise RuntimeError("未安装 paho-mqtt，请先安装 OCS/requirements.txt")
         priority = "CRITICAL" if command == "safe_stop" else "MANUAL_DIAGNOSTIC"
         message = make_message(
             "T-Wave", "command",
@@ -304,9 +344,10 @@ def main() -> int:
     monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password)
     handler = type("BoundUiHandler", (UiHandler,), {"state": state, "monitor": monitor})
     server = ThreadingHTTPServer((args.web_host, args.web_port), handler)
-    monitor.start()
     print(f"OCS UI: http://{args.web_host}:{args.web_port}")
     print(f"Monitoring internal MQTT: {args.broker}:{args.port}")
+    # Start the page first. MQTT may be started later, and the UI will retry.
+    monitor.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
