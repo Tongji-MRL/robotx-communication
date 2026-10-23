@@ -17,6 +17,9 @@ ROOT = "tongji/robotx/v1"
 VEHICLES = ("T-Sky", "T-Wave")
 KINDS = (
     "heartbeat", "task_report", "fault", "ack", "command", "course_config",
+    # MQTT protocol v1 remains unchanged.  The payload below carries the
+    # independent FSM `twave-mission-status-v2` contract verbatim.
+    "mission_status",
 )
 COMMANDS = (
     "start_task", "pause_task", "resume_task", "stop_task", "set_mode",

@@ -45,6 +45,7 @@ UI_COMMANDS = {
     "task4_readiness_confirm",
     "task4_resume",
 }
+STATUS_SCHEMA = "twave-mission-status-v2"
 
 
 def _empty_vehicle(vehicle_id: str) -> dict[str, Any]:
@@ -58,6 +59,7 @@ def _empty_vehicle(vehicle_id: str) -> dict[str, Any]:
         "last_ack": None,
         "last_task_report": None,
         "last_fault": None,
+        "last_updated_unix_ms": None,
     }
 
 
@@ -76,6 +78,8 @@ class MonitorState:
         }
         self.vehicles = {vehicle_id: _empty_vehicle(vehicle_id) for vehicle_id in VEHICLES}
         self.course: dict[str, Any] | None = None
+        self.mission_status: dict[str, Any] | None = None
+        self.mission_status_received_unix_ms: int | None = None
         self.messages: deque[dict[str, Any]] = deque(maxlen=300)
         self.commands: deque[dict[str, Any]] = deque(maxlen=80)
 
@@ -98,13 +102,16 @@ class MonitorState:
             kind = str(envelope.get("kind", "unknown"))
             vehicle_id = str(envelope.get("vehicle_id", ""))
             payload = dict(envelope.get("payload") or {})
-            if kind == "course_config":
+            if kind == "mission_status":
+                self._note_mission_status(payload)
+            elif kind == "course_config":
                 self.course = payload
             elif vehicle_id in self.vehicles:
                 vehicle = self.vehicles[vehicle_id]
                 if kind == "heartbeat":
                     sent_at = envelope.get("sent_at_unix_ms")
                     vehicle["last_seen_unix_ms"] = sent_at
+                    vehicle["last_updated_unix_ms"] = int(time.time() * 1000)
                     vehicle["heartbeat"] = payload
                     vehicle["online"] = True
                     vehicle["status"] = "在线"
@@ -115,11 +122,30 @@ class MonitorState:
                 elif kind == "fault":
                     vehicle["last_fault"] = payload
                     vehicle["status"] = "故障"
+                if kind in {"ack", "task_report", "fault"}:
+                    vehicle["last_updated_unix_ms"] = int(time.time() * 1000)
             self._append_message(
                 direction,
                 f"{kind} · {vehicle_id or 'system'}",
                 {"topic": mqtt_topic, "message": deepcopy(dict(envelope))},
             )
+
+    def _note_mission_status(self, payload: Mapping[str, Any]) -> None:
+        """Accept only the formal status-v2 shape; never synthesize status."""
+        if payload.get("schema_version") != STATUS_SCHEMA:
+            raise ValueError("mission_status must contain twave-mission-status-v2")
+        if not isinstance(payload.get("fsm_state"), str) or not payload["fsm_state"]:
+            raise ValueError("mission_status fsm_state must be a non-empty string")
+        if payload.get("run_id") is not None and (not isinstance(payload["run_id"], int) or isinstance(payload["run_id"], bool) or payload["run_id"] <= 0):
+            raise ValueError("mission_status run_id must be null or positive integer")
+        required_objects = ("course", "safety", "vehicles", "legacy")
+        missing = [name for name in required_objects if not isinstance(payload.get(name), Mapping)]
+        if missing:
+            raise ValueError(f"mission_status missing object fields: {', '.join(missing)}")
+        if not isinstance(payload.get("timestamp"), str) or not payload["timestamp"]:
+            raise ValueError("mission_status timestamp must be a non-empty string")
+        self.mission_status = deepcopy(dict(payload))
+        self.mission_status_received_unix_ms = int(time.time() * 1000)
 
     def note_command(self, mqtt_topic: str, envelope: Mapping[str, Any]) -> None:
         with self.lock:
@@ -146,12 +172,16 @@ class MonitorState:
                     vehicle["online"] = False
                     if vehicle["status"] == "在线":
                         vehicle["status"] = "心跳超时"
+            mission_age = None if self.mission_status_received_unix_ms is None else round(max(0, now_ms - self.mission_status_received_unix_ms) / 1000, 2)
+            mission_online = mission_age is not None and mission_age <= self.stale_after_s
             return {
                 "now_unix_ms": now_ms,
                 "uptime_s": round(time.time() - self.started_at, 1),
                 "broker": deepcopy(self.broker),
                 "vehicles": vehicles,
                 "course": deepcopy(self.course),
+                "mission": deepcopy(self.mission_status),
+                "mission_status": {"received": self.mission_status_received_unix_ms is not None, "last_received_unix_ms": self.mission_status_received_unix_ms, "age_s": mission_age, "online": mission_online, "status": "实时" if mission_online else ("超时" if mission_age is not None else "未收到")},
                 "messages": list(self.messages),
                 "commands": list(self.commands),
             }
@@ -167,10 +197,11 @@ class MonitorState:
 
 class MqttMonitor:
     def __init__(self, state: MonitorState, host: str, port: int, username: str | None = None,
-                 password: str | None = None) -> None:
+                 password: str | None = None, enable_lab_commands: bool = False) -> None:
         self.state = state
         self.host = host
         self.port = port
+        self.enable_lab_commands = enable_lab_commands
         self.client = None
         if mqtt is not None:
             self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -228,6 +259,8 @@ class MqttMonitor:
 
     def send_command(self, command: str, *, parameters: Mapping[str, Any] | None = None,
                      run_id: int | None = None) -> dict[str, Any]:
+        if not self.enable_lab_commands:
+            raise PermissionError("实验室命令已禁用；请使用 --enable-lab-commands 显式开启")
         if command not in UI_COMMANDS:
             raise ValueError(f"UI 不允许发送命令: {command}")
         if self.client is None:
@@ -282,7 +315,10 @@ class UiHandler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_file(UI_FILE, "text/html; charset=utf-8")
         elif path == "/api/state":
-            self._send_json(self.state.snapshot())
+            snapshot = self.state.snapshot()
+            # Added metadata is non-breaking for existing /api/state clients.
+            snapshot["lab_commands_enabled"] = self.monitor.enable_lab_commands
+            self._send_json(snapshot)
         else:
             self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -291,6 +327,9 @@ class UiHandler(BaseHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
+            if not self.monitor.enable_lab_commands:
+                self._send_json({"ok": False, "error": "只读模式：实验室命令未启用"}, status=HTTPStatus.FORBIDDEN)
+                return
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             command = str(body.get("command", ""))
@@ -304,7 +343,7 @@ class UiHandler(BaseHTTPRequestHandler):
                 run_id = int(run_id)
             message = self.monitor.send_command(command, parameters=parameters, run_id=run_id)
             self._send_json({"ok": True, "message_id": message["message_id"], "topic": topic("T-Wave", "command")})
-        except (ValueError, TypeError, RuntimeError, json.JSONDecodeError) as exc:
+        except (ValueError, TypeError, RuntimeError, PermissionError, json.JSONDecodeError) as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
 
     def _send_file(self, path: Path, content_type: str) -> None:
@@ -338,14 +377,16 @@ def main() -> int:
     parser.add_argument("--username")
     parser.add_argument("--password")
     parser.add_argument("--stale-after", type=float, default=3.0)
+    parser.add_argument("--enable-lab-commands", action="store_true", help="allow isolated-lab diagnostic MQTT commands")
     args = parser.parse_args()
 
     state = MonitorState(stale_after_s=args.stale_after)
-    monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password)
+    monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password, args.enable_lab_commands)
     handler = type("BoundUiHandler", (UiHandler,), {"state": state, "monitor": monitor})
     server = ThreadingHTTPServer((args.web_host, args.web_port), handler)
     print(f"OCS UI: http://{args.web_host}:{args.web_port}")
     print(f"Monitoring internal MQTT: {args.broker}:{args.port}")
+    print("LAB COMMANDS: ENABLED (isolated environment only)" if args.enable_lab_commands else "READ-ONLY MODE: lab commands disabled")
     # Start the page first. MQTT may be started later, and the UI will retry.
     monitor.start()
     try:
