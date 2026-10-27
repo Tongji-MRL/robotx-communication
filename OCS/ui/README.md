@@ -1,8 +1,8 @@
 # OCS Vehicle Monitor UI
 
 这是电脑 A 上运行的 OCS 内部通信监控界面。它通过团队内部 MQTT 链路观察
-T-Wave（USV）和 T-Sky（UAV），不连接官方 RoboCommand，也不直接控制 ROS 2、PX4
-或任何车辆执行器。
+T-Wave（USV）和 T-Sky（UAV），并显示 `twave-mission-status-v2` 主状态机快照。
+默认是只读模式，不连接官方 RoboCommand，也不直接控制 ROS 2、PX4 或任何车辆执行器。
 
 ## 1. 启动位置
 
@@ -66,8 +66,23 @@ source .venv/bin/activate
 python -m pip install -r OCS/requirements.txt
 ```
 
-其中 `paho-mqtt` 用于接收车辆消息和发送联调命令。没有安装 MQTT 依赖时，界面仍可
-打开，但只会作为离线页面，不能收发消息。
+其中 `paho-mqtt` 用于接收车辆消息。没有安装 MQTT 依赖时，界面仍可打开，但只会作为
+离线页面，不能收发消息。
+
+### 实验室命令模式
+
+默认启动是只读模式。只有在隔离实验环境中，明确加上以下参数，UI 才允许发送内部
+联调命令：
+
+```bash
+python3 OCS/monitor_ui.py \
+  --broker 127.0.0.1 \
+  --port 1883 \
+  --enable-lab-commands
+```
+
+该模式只允许向 T-Wave 发送受控的实验室命令，不向 T-Sky 直接发命令，也不能替代
+官方 RoboCommand 的 RunStart 或 Task4 链路。正式联调和比赛默认使用只读模式。
 
 ## 4. 界面展示
 
@@ -76,6 +91,13 @@ python -m pip install -r OCS/requirements.txt
 - 显示内部 MQTT Broker 是否连接；
 - 显示当前 Broker 地址和端口；
 - MQTT 未连接时显示等待或断开原因。
+
+### 运行总览
+
+- FSM 当前状态和当前运行任务；
+- `run_id`、安全状态和 FSM 状态新鲜度；
+- Task 1、Task 3、Task 4 的双车进度；
+- Task4Guard、暂停 ACK、checkpoint、Readiness 和恢复条件（如果状态快照提供）。
 
 ### Course 信息
 
@@ -117,7 +139,7 @@ python -m pip install -r OCS/requirements.txt
 
 ### USV 联调控制
 
-控制区固定只面向 `T-Wave`，当前包含：
+只有使用 `--enable-lab-commands` 时才会启用控制接口。控制区固定只面向 `T-Wave`，当前包含：
 
 - `PING`：检查内部通信链路；
 - `SAFE_STOP`：发送车辆侧安全停止命令，需要二次确认；
@@ -177,4 +199,3 @@ tongji/robotx/v1/T-Sky/heartbeat
 ```
 
 UI 不会把原始 ROS 2 Topic、PX4 Topic 或截图自动转换成车辆状态。
-

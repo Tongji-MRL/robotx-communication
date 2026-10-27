@@ -9,11 +9,13 @@
 
 - 显示 T-Wave（USV）和 T-Sky（UAV）的最近心跳、在线/超时状态、模式、当前任务、位置、速度和健康信息；
 - 显示 Course 配置和最近的接收/发送消息；
-- 向 T-Wave 发送受控的实验室联调命令，并记录发送结果；
+- 默认只读显示 T-Wave 的状态；只有启动时显式加入 `--enable-lab-commands` 才允许向
+  T-Wave 发送受控的实验室联调命令，并记录发送结果；
 - `SAFE_STOP` 需要二次确认；UI 不向 UAV 直接发送命令。
 
 正式比赛的 RunStart、Task4 和官方报告仍必须经过 OCS 官方 RoboCommand 链路。UI 中的
-Task4 命令仅用于内部链路调试，不应绕过官方命令序号和现场安全流程。
+Task4 命令仅用于内部链路调试，不应绕过官方命令序号和现场安全流程。当前新版 UI
+还会显示 `twave-mission-status-v2` 的 FSM、Task4Guard 和安全状态。
 
 ## 启动
 
