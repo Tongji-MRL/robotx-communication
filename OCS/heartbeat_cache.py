@@ -116,3 +116,8 @@ class HeartbeatCache:
             raise HeartbeatRejected("real heartbeat cannot carry simulator data")
         if expected_type == "uav" and payload.get("flight_phase") not in {"grounded", "airborne"}:
             raise HeartbeatRejected("UAV heartbeat requires an explicit flight_phase")
+        registration = payload.get("uav_registration")
+        if registration is not None and not isinstance(registration, str):
+            raise HeartbeatRejected("uav_registration must be a string when supplied")
+        if expected_type != "uav" and registration:
+            raise HeartbeatRejected("uav_registration is only valid for a UAV heartbeat")

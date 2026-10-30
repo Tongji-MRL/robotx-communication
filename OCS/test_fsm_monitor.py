@@ -19,8 +19,10 @@ class FsmMonitorTests(unittest.TestCase):
     def test_invalid_status_rejected(self):
         state=MonitorState()
         with self.assertRaises(ValueError): state.note_message("x",make_message("T-Wave","mission_status",{"schema_version":"bad"}))
+        self.assertIsNone(state.snapshot()["mission_status"]["last_received_unix_ms"])
         incomplete = status(); incomplete.pop("legacy")
         with self.assertRaises(ValueError): state.note_message("x", make_message("T-Wave", "mission_status", incomplete, run_id=7))
+        self.assertIsNone(state.snapshot()["mission_status"]["last_received_unix_ms"])
     def test_status_times_out_independently_of_broker(self):
         state=MonitorState(stale_after_s=0.001); state.note_message("x",make_message("T-Wave","mission_status",status(),run_id=7)); time.sleep(.01)
         self.assertFalse(state.snapshot()["mission_status"]["online"])

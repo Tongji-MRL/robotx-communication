@@ -61,4 +61,8 @@ class Ros2TelemetryAdapter:
         }
         if self.vehicle_id == "T-Sky":
             result["flight_phase"] = v["flight_phase"]
+            # Optional registration is sourced only from a verified UAV
+            # telemetry/config adapter; it is never invented by the OCS.
+            if isinstance(v.get("uav_registration"), str):
+                result["uav_registration"] = v["uav_registration"]
         return result

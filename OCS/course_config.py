@@ -86,13 +86,27 @@ def validate_course_fields(course_id: Any, pinger_freq_hz: Any, corners: Iterabl
     return course_id.strip(), pinger_freq_hz, tuple(points)
 
 
-def make_payload(*, course_id: Any, pinger_freq_hz: Any, corners: Iterable[Any], source_sent_at: datetime | None, timestamp: datetime | None = None) -> dict[str, Any]:
+def _optional_polygon(points: Iterable[Any]) -> tuple[tuple[float, float], ...]:
+    values = tuple(points)
+    if not values:
+        return ()
+    # Transit area is an optional, independent closed polygon.  It never
+    # replaces the official Course boundary.
+    _, _, normalized = validate_course_fields("uav_transit_area", 1, values)
+    return normalized
+
+
+def make_payload(*, course_id: Any, pinger_freq_hz: Any, corners: Iterable[Any],
+                 uav_transit_area: Iterable[Any] = (), source_sent_at: datetime | None,
+                 timestamp: datetime | None = None) -> dict[str, Any]:
     course_id, frequency, points = validate_course_fields(course_id, pinger_freq_hz, corners)
+    transit_area = _optional_polygon(uav_transit_area)
     return {
         "schema_version": SCHEMA_VERSION,
         "course_id": course_id,
         "pinger_freq_hz": frequency,
         "corners": [{"latitude": lat, "longitude": lng} for lat, lng in points],
+        "uav_transit_area": [{"latitude": lat, "longitude": lng} for lat, lng in transit_area],
         "source_sent_at": _utc_iso(source_sent_at),
         "timestamp": _utc_iso(timestamp or datetime.now(timezone.utc)),
     }
@@ -111,7 +125,7 @@ def validate_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(timestamp, str): raise ValueError("timestamp must be an RFC3339 timestamp")
     try: datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError as exc: raise ValueError("timestamp must be RFC3339") from exc
-    return make_payload(course_id=payload.get("course_id"), pinger_freq_hz=payload.get("pinger_freq_hz"), corners=payload.get("corners", ()), source_sent_at=datetime.fromisoformat(source.replace("Z", "+00:00")) if source else None, timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
+    return make_payload(course_id=payload.get("course_id"), pinger_freq_hz=payload.get("pinger_freq_hz"), corners=payload.get("corners", ()), uav_transit_area=payload.get("uav_transit_area", ()), source_sent_at=datetime.fromisoformat(source.replace("Z", "+00:00")) if source else None, timestamp=datetime.fromisoformat(timestamp.replace("Z", "+00:00")))
 
 
 def fingerprint(payload: Mapping[str, Any]) -> str:

@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 import time
+from hashlib import sha256
 from typing import Any, Callable
 
 try:
@@ -39,6 +40,55 @@ INTERNAL_COMMAND_TO_PROTOCOL = {
     "PING": "ping",
 }
 
+# The production heartbeat path deliberately does not use the historic
+# ``tongji/robotx/v1`` command/report namespace.
+HEARTBEAT_TOPICS = {
+    "/tongji_mrl/twave/heartbeat": "T-Wave",
+    "/tongji_mrl/tsky/heartbeat": "T-Sky",
+}
+
+
+def heartbeat_envelope(mqtt_topic: str, raw: bytes | str, *, active_run_id: int | None = None) -> dict[str, Any]:
+    """Adapt a raw vehicle heartbeat only at the MQTT receive boundary.
+
+    No vehicle telemetry is invented.  A timestamp is mandatory so the
+    existing freshness policy remains meaningful.  When a producer has no
+    message id, a deterministic digest of its unchanged JSON is used solely
+    for duplicate detection.
+    """
+    vehicle_id = HEARTBEAT_TOPICS.get(mqtt_topic)
+    if vehicle_id is None:
+        raise ValueError(f"unexpected production heartbeat topic: {mqtt_topic}")
+    try:
+        payload = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid heartbeat JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("heartbeat must be a JSON object")
+    # An already-normalized legacy envelope is accepted only on the two formal
+    # heartbeat topics; no legacy subscription is used by production OCS.
+    if payload.get("kind") == "heartbeat" and isinstance(payload.get("payload"), dict):
+        if payload.get("vehicle_id") != vehicle_id:
+            raise ValueError("heartbeat vehicle_id does not match MQTT topic")
+        return payload
+    sent_at = payload.get("sent_at_unix_ms", payload.get("timestamp_unix_ms"))
+    if not isinstance(sent_at, int) or isinstance(sent_at, bool):
+        raise ValueError("raw heartbeat requires integer sent_at_unix_ms or timestamp_unix_ms")
+    message_id = payload.get("message_id")
+    if not isinstance(message_id, str) or not message_id:
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        message_id = sha256(canonical.encode("utf-8")).hexdigest()
+    return {
+        "kind": "heartbeat",
+        "vehicle_id": vehicle_id,
+        "source": vehicle_id,
+        # run_id is routing metadata, not a new field in the raw telemetry.
+        "run_id": payload.get("run_id", active_run_id),
+        "message_id": message_id,
+        "sent_at_unix_ms": sent_at,
+        "payload": payload,
+    }
+
 
 class VehicleLink:
     def __init__(
@@ -52,14 +102,18 @@ class VehicleLink:
         username: str | None = None,
         password: str | None = None,
         on_connect: Callable[[], None] | None = None,
+        active_run_id: Callable[[], int | None] | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
         self.vehicle_id = vehicle_id
         self.on_message = on_message
         self.command_topic = command_topic or topic("T-Wave", "command")
-        self.subscription_topic = subscription_topic or f"tongji/robotx/v1/{vehicle_id or '+'}/+"
+        self.subscription_topics = (
+            (subscription_topic,) if subscription_topic else tuple(HEARTBEAT_TOPICS)
+        )
         self.on_connect = on_connect
+        self.active_run_id = active_run_id or (lambda: None)
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
@@ -73,8 +127,9 @@ class VehicleLink:
         if reason_code != 0:
             print(f"[MQTT] connection failed: {reason_code}", file=sys.stderr)
             return
-        client.subscribe(self.subscription_topic, qos=1)
-        print(f"[MQTT] connected; observing {self.subscription_topic}")
+        for mqtt_topic in self.subscription_topics:
+            client.subscribe(mqtt_topic, qos=1)
+        print(f"[MQTT] connected; observing {', '.join(self.subscription_topics)}")
         if self.on_connect is not None:
             self.on_connect()
 
@@ -84,13 +139,8 @@ class VehicleLink:
 
     def _on_message(self, _client, _userdata, message) -> None:
         try:
-            value = decode(message.payload)
-            # Heartbeats arrive at 2 Hz per vehicle; do not dump full JSON at
-            # that rate. Other report kinds remain fully traceable.
-            if value.get("kind") == "heartbeat":
-                print(f"[RxVehicle] heartbeat vehicle={value.get('vehicle_id')} id={value.get('message_id')}")
-            else:
-                print(f"[RxVehicle] {message.topic}\n{json.dumps(value, ensure_ascii=False, indent=2)}")
+            value = heartbeat_envelope(message.topic, message.payload, active_run_id=self.active_run_id())
+            print(f"[RxVehicle] heartbeat vehicle={value.get('vehicle_id')} id={value.get('message_id')}")
             if self.on_message is not None:
                 self.on_message(value)
         except Exception as exc:  # keep the internal MQTT loop alive on bad reports
