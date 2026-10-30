@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -152,6 +153,7 @@ class OcsClient:
         self.mission_coordinator = mission_coordinator
         self._team_seq = 0
         self._report_seq: dict[str, int] = {}
+        self._report_lock = threading.Lock()
         self._declared_vehicle_ids: set[str] = set()
         self.declaration_seq: int | None = None
         self.run_id: int | None = None
@@ -166,8 +168,17 @@ class OcsClient:
         # protocol boundaries; vehicle_link.py is the internal MQTT adapter.
         self._pending_internal_actions: list[dict] = []
         self._relayed_official_commands: dict[int, str] = {}
+        # A ReadinessConfirm names the official per-vehicle RxReport sequence,
+        # while the FSM must also recover the original AssistanceRequest
+        # sequence.  Keep only the active-run, in-memory correlation here; a
+        # fresh RunDeclaration clears it with the other active-run state.
+        self._readiness_reports: dict[tuple[int, str, int], dict[str, object]] = {}
         self.heartbeat_cache = HeartbeatCache()
         self._authoritative_current_task: dict[str, str] = {}
+        self.latest_fsm_status: dict | None = None
+        self.latest_fsm_task_report: dict | None = None
+        self.latest_fsm_fault: dict | None = None
+        self.runtime_events: list[dict[str, object]] = []
         self.connected = False
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.client.on_connect = self._on_connect
@@ -197,6 +208,7 @@ class OcsClient:
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
         if reason_code != 0:
             self.connected = False
+            self._record_runtime_event("mqtt", "connect_failed", detail=str(reason_code))
             print(f"[MQTT] connection failed: {reason_code}", file=sys.stderr)
             return
         self.connected = True
@@ -205,6 +217,7 @@ class OcsClient:
 
     def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
         self.connected = False
+        self._record_runtime_event("mqtt", "disconnected", detail=str(reason_code))
         print(f"[MQTT] disconnected: {reason_code}")
 
     def _on_message(self, _client, _userdata, message) -> None:
@@ -222,7 +235,19 @@ class OcsClient:
             else:
                 print(f"[MQTT] ignored unexpected topic: {message.topic}", file=sys.stderr)
         except Exception as exc:  # keep MQTT loop alive on malformed payloads
+            self._record_runtime_event("mqtt", "decode_rejected", topic=message.topic, detail=str(exc))
             print(f"[MQTT] cannot decode {message.topic}: {exc}", file=sys.stderr)
+
+    def _record_runtime_event(self, source: str, event: str, *, topic: str | None = None,
+                              run_id: int | None = None, command_seq: int | None = None,
+                              detail: str = "") -> None:
+        """Keep bounded transport diagnostics; never retries control work."""
+        self.runtime_events.append({
+            "source": source, "event": event, "timestamp_unix_ms": int(time.time() * 1000),
+            "topic": topic, "run_id": self.run_id if run_id is None else run_id,
+            "command_seq": command_seq, "detail": detail, "state": "OBSERVED",
+        })
+        del self.runtime_events[:-100]
 
     @staticmethod
     def _validate_course(course: rx_course_pb2.RxCourse) -> None:
@@ -230,6 +255,7 @@ class OcsClient:
         make_payload(
             course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
             corners=((item.latitude, item.longitude) for item in course.corners),
+            uav_transit_area=((item.latitude, item.longitude) for item in course.uav_transit_area),
             source_sent_at=course.sent_at.ToDatetime(tzinfo=timezone.utc)
             if (course.sent_at.seconds or course.sent_at.nanos) else None,
         )
@@ -240,6 +266,7 @@ class OcsClient:
         payload = make_payload(
             course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
             corners=((item.latitude, item.longitude) for item in course.corners),
+            uav_transit_area=((item.latitude, item.longitude) for item in course.uav_transit_area),
             source_sent_at=source_sent_at,
         )
         new_fingerprint = fingerprint(payload)
@@ -249,6 +276,7 @@ class OcsClient:
             course_id=course.course_id,
             pinger_freq_hz=course.pinger_freq_hz,
             corners=((corner.latitude, corner.longitude) for corner in course.corners),
+            uav_transit_area=((point.latitude, point.longitude) for point in course.uav_transit_area),
             sent_at=source_sent_at,
         )
         if new_fingerprint != self._course_fingerprint:
@@ -270,7 +298,8 @@ class OcsClient:
             "kind": "course_config", "vehicle_id": self.mission_coordinator,
             "payload": make_payload(
                 course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
-                corners=course.corners, source_sent_at=course.sent_at,
+                corners=course.corners, uav_transit_area=course.uav_transit_area,
+                source_sent_at=course.sent_at,
             ),
         })
 
@@ -364,10 +393,42 @@ class OcsClient:
         return []
 
     def accept_vehicle_readiness_report(
-        self, vehicle_id: str, *, command_seq: int, subject_vehicle_id: str | None = None
+        self,
+        vehicle_id: str,
+        *,
+        command_seq: int,
+        subject_vehicle_id: str | None = None,
+        readiness_event_id: object = None,
     ) -> list[dict]:
         """Translate a USV readiness event into official ReadinessReport."""
-        self.publish_readiness_report(subject_vehicle_id or vehicle_id, command_seq)
+        report_vehicle_id = subject_vehicle_id or vehicle_id
+        report_seq, _publish_mid = self._publish_readiness_report_with_sequence(
+            report_vehicle_id, command_seq
+        )
+        if readiness_event_id is not None:
+            if not isinstance(readiness_event_id, str) or not readiness_event_id:
+                raise ValueError("readiness_event_id must be a non-empty string")
+            if self.run_id is None:
+                raise ValueError("ReadinessReport cannot be correlated before an active run")
+            self._readiness_reports[(self.run_id, report_vehicle_id, report_seq)] = {
+                "original_command_seq": command_seq,
+                "readiness_event_id": readiness_event_id,
+            }
+            self._queue_internal_action({
+                "kind": "internal_command",
+                "vehicle_id": self.mission_coordinator,
+                "run_id": self.run_id,
+                "command": "TASK4_READINESS_REPORT_PUBLISHED",
+                "command_seq": command_seq,
+                "priority": "OFFICIAL",
+                "preempt": False,
+                "parameters": {
+                    "vehicle": "usv" if report_vehicle_id == "T-Wave" else "uav",
+                    "original_command_seq": command_seq,
+                    "report_seq": report_seq,
+                    "readiness_event_id": readiness_event_id,
+                },
+            })
         return []
 
     def accept_vehicle_envelope(self, envelope: Mapping) -> None:
@@ -411,6 +472,63 @@ class OcsClient:
             print(f"[VehicleFault] {vehicle_id}: {payload}", file=sys.stderr)
         elif kind != "command":
             raise ValueError(f"unsupported vehicle message kind: {kind}")
+
+    def accept_fsm_status(self, raw: str) -> None:
+        """Record an opaque, formal ROS 2 FSM status without changing its contract."""
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("FSM status must be a JSON object")
+        self.latest_fsm_status = value
+
+    def accept_fsm_task_report(self, raw: str) -> None:
+        """Consume an FSM ROS 2 report only when it explicitly carries an official report.
+
+        OCS never infers a RoboCommand result from FSM progress/status.  This
+        preserves the existing explicit ``official_report`` conversion rule.
+        """
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("FSM task_report must be a JSON object")
+        self.latest_fsm_task_report = value
+        if not isinstance(value.get("official_report"), Mapping):
+            return
+        # MissionPlanner status uses its domain labels (``usv``/``uav``),
+        # whereas RoboCommand identifies the declared vehicles as
+        # ``T-Wave``/``T-Sky``.  Normalize only these two frozen labels at the
+        # ROS2-to-OCS boundary; all other inputs remain rejected downstream.
+        source_vehicle = value.get("vehicle_id", value.get("vehicle"))
+        report_vehicle = value["official_report"].get("vehicle_id", source_vehicle)
+        vehicle_id = self._official_vehicle_id(source_vehicle)
+        official_vehicle_id = self._official_vehicle_id(report_vehicle)
+        if vehicle_id is None or official_vehicle_id is None:
+            raise ValueError("FSM task_report contains an unknown vehicle label")
+        normalized = dict(value)
+        normalized_report = dict(value["official_report"])
+        normalized_report["vehicle_id"] = official_vehicle_id
+        normalized["vehicle_id"] = vehicle_id
+        normalized["official_report"] = normalized_report
+        self.accept_vehicle_task_report(vehicle_id, normalized)
+
+    def accept_fsm_fault(self, raw: str) -> None:
+        """Record a formal FSM fault without inventing an official RxReport body."""
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("FSM fault must be a JSON object")
+        self.latest_fsm_fault = dict(value)
+        self._record_runtime_event(
+            "ros2", "fsm_fault", topic="/tongji_mrl/mission/fault",
+            run_id=value.get("run_id") if isinstance(value.get("run_id"), int) else None,
+            command_seq=value.get("command_seq") if isinstance(value.get("command_seq"), int) else None,
+            detail=str(value.get("error") or value.get("error_code") or "FSM fault"),
+        )
+
+    @staticmethod
+    def _official_vehicle_id(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        if value in {"T-Wave", "T-Sky"}:
+            return value
+        return {"usv": "T-Wave", "uav": "T-Sky"}.get(value)
 
     def set_authoritative_current_task(self, vehicle_id: str, current_task: str | None) -> None:
         """Set task state only from a confirmed MissionCoordinator contract."""
@@ -493,6 +611,7 @@ class OcsClient:
                 vehicle_id,
                 command_seq=int(report["command_seq"]),
                 subject_vehicle_id=report_vehicle_id,
+                readiness_event_id=report.get("readiness_event_id"),
             )
         else:
             raise ValueError(f"unsupported official_report type: {report_type}")
@@ -539,11 +658,24 @@ class OcsClient:
                 "heading_deg": body.heading_deg,
                 "speed_mps": body.speed_mps,
                 "affected_vehicle_types": [int(value) for value in body.affected_vehicle_types],
+                # Preserve the official scalar exactly.  Proto3 uses 0.0 for
+                # an omitted field; the OCS must not replace it with a local
+                # fixed radius.
+                "keep_out_radius_m": body.keep_out_radius_m,
             })
         elif body_name == "readiness_confirm":
+            vehicle_id = self._official_vehicle_id(body.vehicle_id)
+            if vehicle_id is None or self.run_id is None:
+                raise ValueError("ReadinessConfirm vehicle_id or active run is invalid")
+            record = self._readiness_reports.get((self.run_id, vehicle_id, body.report_seq))
+            if record is None:
+                raise ValueError("ReadinessConfirm does not match an OCS-published ReadinessReport")
             parameters.update({
                 "report_seq": body.report_seq,
-                "vehicle_id": body.vehicle_id,
+                "vehicle_id": vehicle_id,
+                "vehicle": "usv" if vehicle_id == "T-Wave" else "uav",
+                "original_command_seq": record["original_command_seq"],
+                "readiness_event_id": record["readiness_event_id"],
             })
         else:
             raise ValueError(f"unsupported official command body: {body_name}")
@@ -574,10 +706,15 @@ class OcsClient:
         if self._declared_vehicle_ids and vehicle_id not in self._declared_vehicle_ids:
             raise ValueError(f"vehicle_id {vehicle_id!r} was not declared for this run")
 
+    def _next_report_seq(self, vehicle_id: str) -> int:
+        with self._report_lock:
+            seq = self._report_seq.get(vehicle_id, 0) + 1
+            self._report_seq[vehicle_id] = seq
+            return seq
+
     def _publish_vehicle_body(self, vehicle_id: str, body_name: str, body) -> int:
         self._check_vehicle(vehicle_id)
-        seq = self._report_seq.get(vehicle_id, 0) + 1
-        self._report_seq[vehicle_id] = seq
+        seq = self._next_report_seq(vehicle_id)
         report = rx_reports_pb2.RxReport(
             team_id=self.team_id,
             vehicle_id=vehicle_id,
@@ -592,6 +729,7 @@ class OcsClient:
         result = self.client.publish(topic, message.SerializeToString(), qos=1)
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            self._record_runtime_event("mqtt", "publish_failed", topic=topic, detail=str(result.rc))
             raise RuntimeError(f"publish failed ({result.rc}) on {topic}")
         print(f"Published {type(message).__name__} -> {topic}")
         return result.mid
@@ -601,6 +739,8 @@ class OcsClient:
         vehicle_ids: Sequence[str],
         task_tiers: Sequence[int | str] = ("disruptive", "none", "disruptive", "disruptive"),
         uav_geofence: Iterable[tuple[float, float]] = (),
+        uav_geofence_max_altitude_hae_m: float | None = None,
+        uav_pilot_callsign: str | None = None,
     ) -> int:
         ids = [item.strip() for item in vehicle_ids if item.strip()]
         if not ids:
@@ -612,6 +752,15 @@ class OcsClient:
         fence = [_lat_lng(lat, lng) for lat, lng in uav_geofence]
         if fence and fence[0] != fence[-1]:
             raise ValueError("uav_geofence must be a closed polygon (first point = last point)")
+        if "T-Sky" in ids:
+            if not fence:
+                raise ValueError("a declared UAV requires a non-empty uav_geofence")
+            if (isinstance(uav_geofence_max_altitude_hae_m, bool)
+                    or not isinstance(uav_geofence_max_altitude_hae_m, (int, float))
+                    or not 0 < float(uav_geofence_max_altitude_hae_m) <= 50):
+                raise ValueError("a declared UAV requires uav_geofence_max_altitude_hae_m in (0, 50]")
+            if not isinstance(uav_pilot_callsign, str) or not uav_pilot_callsign.strip():
+                raise ValueError("a declared UAV requires a non-empty uav_pilot_callsign")
         self._declared_vehicle_ids = set(ids)
         self.run_id = None
         self.last_command = None
@@ -621,6 +770,7 @@ class OcsClient:
         self._authoritative_current_task.clear()
         self._pending_internal_actions.clear()
         self._relayed_official_commands.clear()
+        self._readiness_reports.clear()
         self._team_seq += 1
         declaration = rx_requests_pb2.RunDeclaration(
             vehicle_ids=ids,
@@ -629,6 +779,8 @@ class OcsClient:
             task3_tier=_enum(task_tiers[2], TIER_MAP, "task3 tier"),
             task4_tier=_enum(task_tiers[3], TIER_MAP, "task4 tier"),
             uav_geofence=fence,
+            uav_geofence_max_altitude_hae_m=float(uav_geofence_max_altitude_hae_m or 0),
+            uav_pilot_callsign=(uav_pilot_callsign or "").strip(),
         )
         request = rx_requests_pb2.RxRequest(
             team_id=self.team_id,
@@ -655,10 +807,15 @@ class OcsClient:
         altitude_hae_m: float = 0.0,
         depth_m: float = 0.0,
         flight_phase: int | str = "unknown",
+        uav_registration: str | None = None,
     ) -> int:
         self._check_vehicle(vehicle_id)
-        seq = self._report_seq.get(vehicle_id, 0) + 1
-        self._report_seq[vehicle_id] = seq
+        resolved_vehicle_type = _enum(vehicle_type, TYPE_MAP, "vehicle_type")
+        if uav_registration is not None and not isinstance(uav_registration, str):
+            raise ValueError("uav_registration must be a string or null")
+        if uav_registration and resolved_vehicle_type != rx_common_pb2.TYPE_UAV:
+            raise ValueError("uav_registration is only valid for a UAV heartbeat")
+        seq = self._next_report_seq(vehicle_id)
         report = rx_reports_pb2.RxReport(
             team_id=self.team_id,
             vehicle_id=vehicle_id,
@@ -674,8 +831,9 @@ class OcsClient:
                 altitude_hae_m=altitude_hae_m,
                 depth_m=depth_m,
                 current_task=_enum(current_task, TASK_MAP, "current_task"),
-                vehicle_type=_enum(vehicle_type, TYPE_MAP, "vehicle_type"),
+                vehicle_type=resolved_vehicle_type,
                 flight_phase=_enum(flight_phase, FLIGHT_PHASE_MAP, "flight_phase"),
+                uav_registration=uav_registration or "",
             ),
         )
         topic = f"{TOPIC_ROOT}/{self.team_id}/{vehicle_id}/report"
@@ -744,9 +902,28 @@ class OcsClient:
     def publish_readiness_report(self, vehicle_id: str, command_seq: int) -> int:
         if command_seq <= 0:
             raise ValueError("command_seq must be positive")
-        return self._publish_vehicle_body(
-            vehicle_id, "readiness", rx_reports_pb2.ReadinessReport(command_seq=command_seq)
+        _report_seq, publish_mid = self._publish_readiness_report_with_sequence(
+            vehicle_id, command_seq
         )
+        return publish_mid
+
+    def _publish_readiness_report_with_sequence(
+        self, vehicle_id: str, command_seq: int
+    ) -> tuple[int, int]:
+        """Publish ReadinessReport and retain its official per-vehicle seq."""
+        if command_seq <= 0:
+            raise ValueError("command_seq must be positive")
+        self._check_vehicle(vehicle_id)
+        report_seq = self._next_report_seq(vehicle_id)
+        report = rx_reports_pb2.RxReport(
+            team_id=self.team_id,
+            vehicle_id=vehicle_id,
+            seq=report_seq,
+            sent_at=now_timestamp(),
+            readiness=rx_reports_pb2.ReadinessReport(command_seq=command_seq),
+        )
+        topic = f"{TOPIC_ROOT}/{self.team_id}/{vehicle_id}/report"
+        return report_seq, self._publish(topic, report)
 
 
 def load_config(path: Path) -> dict:
@@ -758,7 +935,9 @@ def config_values(config: dict) -> tuple[str, str, int, list[str]]:
     team_id = config.get("team_id", "TONG")
     official = config.get("robocommand", {})
     internal = config.get("internal_broker", {})
-    host = str(official.get("host") or internal.get("host", "127.0.0.1"))
+    host = str(official.get("host") or "")
+    if not host or host.startswith(("TBD", "COURSE_HOST")):
+        raise ValueError("robocommand.host must be explicitly configured; internal_broker is heartbeat-only")
     port = int(official.get("port", 1883))
     vehicles = [
         str(item["vehicle_id"])
@@ -768,7 +947,7 @@ def config_values(config: dict) -> tuple[str, str, int, list[str]]:
     return team_id, host, port, vehicles or ["T-Sky", "T-Wave"]
 
 
-def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tuple[float, float]]]:
+def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tuple[float, float]], float | None, str | None]:
     declaration = config.get("run_declaration", {})
     tiers = declaration.get("task_tiers", {})
     task_tiers = (
@@ -781,7 +960,9 @@ def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tu
         (float(point["latitude"]), float(point["longitude"]))
         for point in declaration.get("uav_geofence", [])
     ]
-    return task_tiers, geofence
+    altitude = declaration.get("uav_geofence_max_altitude_hae_m")
+    callsign = declaration.get("uav_pilot_callsign")
+    return task_tiers, geofence, altitude, callsign
 
 
 def main() -> int:
@@ -807,14 +988,18 @@ def main() -> int:
 
     config = load_config(args.config)
     team_id, host, port, vehicles = config_values(config)
-    task_tiers, uav_geofence = declaration_values(config)
+    task_tiers, uav_geofence, uav_altitude, uav_pilot_callsign = declaration_values(config)
     host = args.broker or host
     port = args.port or port
     client = OcsClient(host, port, team_id)
     try:
         client.connect()
         if args.publish_declaration:
-            client.publish_run_declaration(vehicles, task_tiers, uav_geofence)
+            client.publish_run_declaration(
+                vehicles, task_tiers, uav_geofence,
+                uav_geofence_max_altitude_hae_m=uav_altitude,
+                uav_pilot_callsign=uav_pilot_callsign,
+            )
         if args.demo_heartbeats:
             deadline = time.monotonic() + args.duration
             task3_published = False
