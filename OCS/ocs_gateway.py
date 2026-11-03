@@ -25,6 +25,7 @@ from ocs_client import (
     load_config,
 )
 from vehicle_link import VehicleLink
+from fsm_message_adapter import build_run_start, build_task4
 
 
 MISSION_TOPICS = {
@@ -130,8 +131,12 @@ class Ros2MissionLink:
         if command == "RUN_START":
             if self._node.run_start_pub.get_subscription_count() == 0:
                 return False, "no matching FSM RunStart subscriber"
-            # This is intentionally the entire frozen FSM contract.
-            self._node.run_start_pub.publish(self._string('{"command":"begin"}'))
+            payload = build_run_start(action)
+            if payload is None:
+                return False, "RunStart missing valid run_id or official command_seq"
+            self._node.run_start_pub.publish(self._string(json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            )))
             return True, None
         task4 = self._task4_payload(action)
         if task4 is None:
@@ -143,64 +148,7 @@ class Ros2MissionLink:
 
     @staticmethod
     def _task4_payload(action: dict) -> dict | None:
-        parameters = dict(action.get("parameters") or {})
-        if action.get("command") == "TASK4_ASSISTANCE":
-            vehicle = {1: "usv", 3: "uav"}.get(parameters.get("vehicle_type"))
-            position, command_seq = parameters.get("position"), parameters.get("official_command_seq")
-            if vehicle is None or not isinstance(position, dict) or not isinstance(command_seq, int) or command_seq <= 0:
-                return None
-            return {"vehicle": vehicle, "task": "TASK4", "command": {"type": "ASSISTANCE_REQUEST", "command_seq": command_seq, "position": position}}
-        if action.get("command") == "TASK4_READINESS_CONFIRM":
-            report_seq = parameters.get("report_seq")
-            original_command_seq = parameters.get("original_command_seq")
-            vehicle = parameters.get("vehicle")
-            if (
-                not isinstance(report_seq, int) or report_seq <= 0
-                or not isinstance(original_command_seq, int) or original_command_seq <= 0
-                or vehicle not in {"usv", "uav"}
-            ):
-                return None
-            return {
-                "schema_version": "twave-mission-task4-v1",
-                "run_id": action.get("run_id"),
-                "command_id": f"robocommand:{action.get('command_seq')}:readiness-confirm",
-                "vehicle": vehicle,
-                "task": "TASK4",
-                "command": {
-                    "type": "READINESS_CONFIRM",
-                    "command_seq": original_command_seq,
-                    "original_command_seq": original_command_seq,
-                    "report_seq": report_seq,
-                },
-            }
-        if action.get("command") == "TASK4_READINESS_REPORT_PUBLISHED":
-            report_seq = parameters.get("report_seq")
-            original_command_seq = parameters.get("original_command_seq")
-            readiness_event_id = parameters.get("readiness_event_id")
-            vehicle = parameters.get("vehicle")
-            if (
-                not isinstance(report_seq, int) or report_seq <= 0
-                or not isinstance(original_command_seq, int) or original_command_seq <= 0
-                or not isinstance(readiness_event_id, str) or not readiness_event_id
-                or vehicle not in {"usv", "uav"}
-                or not isinstance(action.get("run_id"), int) or action["run_id"] <= 0
-            ):
-                return None
-            return {
-                "schema_version": "twave-mission-task4-v1",
-                "run_id": action["run_id"],
-                "command_id": f"{readiness_event_id}:published:{report_seq}",
-                "vehicle": vehicle,
-                "task": "TASK4",
-                "command": {
-                    "type": "READINESS_REPORT_PUBLISHED",
-                    "command_seq": original_command_seq,
-                    "report_seq": report_seq,
-                    "readiness_event_id": readiness_event_id,
-                    "internal_origin": "ocs",
-                },
-            }
-        return None
+        return build_task4(action)
 
     @staticmethod
     def _string(data: str):

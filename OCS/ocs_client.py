@@ -492,6 +492,37 @@ class OcsClient:
         self.latest_fsm_task_report = value
         if not isinstance(value.get("official_report"), Mapping):
             return
+        report = value["official_report"]
+        report_type = str(report.get("type", "")).lower()
+        # The current FSM labels its synthetic Task4 readiness as dry_run.
+        # Such events are NOT evidence that a real vehicle is on station.
+        if report_type == "readiness" and report.get("dry_run") is True:
+            self._record_runtime_event(
+                "ros2", "dry_run_readiness_blocked",
+                detail="FSM synthetic readiness must not become an official RxReport",
+            )
+            return
+        # A Task4 incident acknowledgement is not a transport ACK.
+        if report_type == "incident_ack" and (
+            value.get("ack_scope") != "fsm" or value.get("accepted") is not True
+        ):
+            self._record_runtime_event(
+                "ros2", "unconfirmed_incident_ack_blocked",
+                detail="IncidentAck requires accepted=True and ack_scope=fsm",
+            )
+            return
+        # Reject uncorrelated/stale Task4 reports, not arbitrary Task1/3
+        # result payloads whose run_id format is owned by task adapters.
+        if report_type in {"readiness", "incident_ack"} and (
+            not isinstance(self.run_id, int)
+            or type(value.get("run_id")) is not int
+            or value["run_id"] != self.run_id
+        ):
+            self._record_runtime_event(
+                "ros2", "task4_cross_run_report_blocked",
+                detail="Task4 official report is missing active run correlation",
+            )
+            return
         # MissionPlanner status uses its domain labels (``usv``/``uav``),
         # whereas RoboCommand identifies the declared vehicles as
         # ``T-Wave``/``T-Sky``.  Normalize only these two frozen labels at the

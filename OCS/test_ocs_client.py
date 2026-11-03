@@ -239,7 +239,7 @@ class OcsClientTests(unittest.TestCase):
             "command_id": "assist-2",
             "official_report": {
                 "type": "readiness", "vehicle_id": "uav", "command_seq": 2,
-                "readiness_event_id": "assist-2:readiness", "dry_run": True,
+                "readiness_event_id": "assist-2:readiness", "dry_run": False,
             },
         }))
         report = self.published[-1][1]
@@ -315,6 +315,38 @@ class OcsClientTests(unittest.TestCase):
         )
         action = self.client._relay_official_command(command)
         self.assertEqual(action["parameters"]["keep_out_radius_m"], 12.5)
+
+
+    def test_fsm_dry_run_readiness_cannot_reach_official_broker(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.run_id = 42
+        initial = len(self.published)
+        self.client.accept_fsm_task_report(json.dumps({
+            "run_id": 42, "vehicle": "uav", "task": "TASK4",
+            "official_report": {"type": "readiness", "vehicle_id": "uav",
+                                "command_seq": 9, "dry_run": True},
+        }))
+        self.assertEqual(len(self.published), initial)
+        self.assertEqual(self.client.runtime_events[-1]["event"], "dry_run_readiness_blocked")
+
+    def test_unconfirmed_and_wrong_run_task4_reports_do_not_reach_rbc(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.run_id = 42
+        initial = len(self.published)
+        report = {"type": "incident_ack", "vehicle_id": "usv", "command_seq": 9}
+        self.client.accept_fsm_task_report(json.dumps({
+            "run_id": 42, "vehicle": "usv", "official_report": report,
+            "accepted": True,
+        }))
+        self.assertEqual(len(self.published), initial)
+        self.assertEqual(self.client.runtime_events[-1]["event"], "unconfirmed_incident_ack_blocked")
+        self.client.accept_fsm_task_report(json.dumps({
+            "run_id": 41, "vehicle": "usv", "official_report": report,
+            "accepted": True, "ack_scope": "fsm",
+        }))
+        self.assertEqual(len(self.published), initial)
+        self.assertEqual(self.client.runtime_events[-1]["event"], "task4_cross_run_report_blocked")
+
 
 
 if __name__ == "__main__":
