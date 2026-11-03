@@ -78,7 +78,12 @@ class OcsHeartbeatPublicationTests(unittest.TestCase):
         client = ocs_client.OcsClient("127.0.0.1", 1883)
         published = []
         client._publish = lambda topic, message: published.append((topic, message)) or len(published)
-        client.publish_run_declaration(["T-Wave", "T-Sky"])
+        client.publish_run_declaration(
+            ["T-Wave", "T-Sky"],
+            uav_geofence=[(1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)],
+            uav_geofence_max_altitude_hae_m=40.0,
+            uav_pilot_callsign="TEST-PILOT-UAPL-000",
+        )
         client.run_id = 42
         now = int(time.time() * 1000)
         client.accept_vehicle_envelope(heartbeat("T-Wave", now=now, message_id="wave"))
@@ -93,6 +98,7 @@ class OcsHeartbeatPublicationTests(unittest.TestCase):
         self.assertEqual(sky.heartbeat.roll_deg, 1.0)
         self.assertEqual(sky.heartbeat.flight_phase, ocs_client.rx_common_pb2.FLIGHT_PHASE_AIRBORNE)
         self.assertEqual(sky.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_COORDINATED_LOGISTICS)
+        self.assertEqual(sky.heartbeat.uav_registration, "")
         client.publish_docking_report("T-Wave", 1)
         self.assertEqual([message.seq for _topic, message in published[1:]
                           if message.vehicle_id == "T-Wave"], [1, 2])
