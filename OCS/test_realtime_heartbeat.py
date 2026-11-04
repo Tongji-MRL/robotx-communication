@@ -78,6 +78,11 @@ class OcsHeartbeatPublicationTests(unittest.TestCase):
         client = ocs_client.OcsClient("127.0.0.1", 1883)
         published = []
         client._publish = lambda topic, message: published.append((topic, message)) or len(published)
+        course = ocs_client.rx_course_pb2.RxCourse(course_id="RX2026-A", pinger_freq_hz=27000)
+        for latitude, longitude in ((1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)):
+            course.corners.add(latitude=latitude, longitude=longitude)
+        client._accept_course(course)
+        client.drain_internal_actions()
         client.publish_run_declaration(
             ["T-Wave", "T-Sky"],
             uav_geofence=[(1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)],

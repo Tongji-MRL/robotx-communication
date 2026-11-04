@@ -47,6 +47,76 @@ def _segments_intersect(a: tuple[float, float], b: tuple[float, float], c: tuple
     return (ab_c > 0) != (ab_d > 0) and (cd_a > 0) != (cd_b > 0)
 
 
+def _point_on_segment(point: tuple[float, float], start: tuple[float, float], end: tuple[float, float]) -> bool:
+    return abs(_orientation(start, end, point)) <= 1e-12 and _on_segment(start, end, point)
+
+
+def _point_in_or_on_polygon(point: tuple[float, float], polygon: tuple[tuple[float, float], ...]) -> bool:
+    ring = polygon[:-1]
+    for index, start in enumerate(ring):
+        if _point_on_segment(point, start, ring[(index + 1) % len(ring)]):
+            return True
+    inside = False
+    latitude, longitude = point
+    for index, start in enumerate(ring):
+        end = ring[(index + 1) % len(ring)]
+        if (start[0] > latitude) != (end[0] > latitude):
+            intersection_longitude = (end[1] - start[1]) * (latitude - start[0]) / (end[0] - start[0]) + start[1]
+            if longitude < intersection_longitude:
+                inside = not inside
+    return inside
+
+
+def _edge_breakpoints(
+    start: tuple[float, float], end: tuple[float, float], boundary: tuple[tuple[float, float], ...]
+) -> list[float]:
+    """Return edge parameters at boundary intersections without changing either ring."""
+    delta_lat, delta_lon = end[0] - start[0], end[1] - start[1]
+    length_sq = delta_lat * delta_lat + delta_lon * delta_lon
+    values = [0.0, 1.0]
+    for index, boundary_start in enumerate(boundary[:-1]):
+        boundary_end = boundary[index + 1]
+        if not _segments_intersect(start, end, boundary_start, boundary_end):
+            continue
+        denominator = delta_lat * (boundary_end[1] - boundary_start[1]) - delta_lon * (boundary_end[0] - boundary_start[0])
+        if abs(denominator) > 1e-12:
+            offset_lat, offset_lon = boundary_start[0] - start[0], boundary_start[1] - start[1]
+            values.append((offset_lat * (boundary_end[1] - boundary_start[1]) - offset_lon * (boundary_end[0] - boundary_start[0])) / denominator)
+        else:
+            for point in (boundary_start, boundary_end):
+                if _point_on_segment(point, start, end):
+                    values.append(((point[0] - start[0]) * delta_lat + (point[1] - start[1]) * delta_lon) / length_sq)
+    return sorted({max(0.0, min(1.0, value)) for value in values})
+
+
+def validate_geofence_within_course(
+    course_corners: Iterable[Any], uav_geofence: Iterable[Any]
+) -> tuple[tuple[float, float], ...]:
+    """Validate, but never reshape, a closed UAV geofence against Course corners.
+
+    RobotX Handbook 3.4.10 requires the declared fence to be within the received
+    Course boundary.  ``uav_transit_area`` is deliberately not accepted here:
+    the Handbook does not authorize merging it into the declaration boundary.
+    """
+    _, _, course = validate_course_fields("course", 1, course_corners)
+    _, _, fence = validate_course_fields("uav_geofence", 1, uav_geofence)
+    all_longitudes = [point[1] for point in course[:-1] + fence[:-1]]
+    if max(all_longitudes) - min(all_longitudes) > 180:
+        raise ValueError("cannot validate geofence geometry across the antimeridian")
+    for index, point in enumerate(fence[:-1]):
+        if not _point_in_or_on_polygon(point, course):
+            raise ValueError(f"uav_geofence vertex {index} is outside the Course boundary")
+    for index, start in enumerate(fence[:-1]):
+        end = fence[index + 1]
+        breakpoints = _edge_breakpoints(start, end, course)
+        for left, right in zip(breakpoints, breakpoints[1:]):
+            midpoint = (start[0] + (end[0] - start[0]) * (left + right) / 2,
+                        start[1] + (end[1] - start[1]) * (left + right) / 2)
+            if not _point_in_or_on_polygon(midpoint, course):
+                raise ValueError(f"uav_geofence edge {index} leaves the Course boundary")
+    return fence
+
+
 def validate_course_fields(course_id: Any, pinger_freq_hz: Any, corners: Iterable[Any]) -> tuple[str, int, tuple[tuple[float, float], ...]]:
     if not isinstance(course_id, str) or not course_id.strip() or len(course_id) > 128:
         raise ValueError("course_id must be a non-empty string up to 128 characters")

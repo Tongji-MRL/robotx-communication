@@ -26,6 +26,7 @@ from ocs_client import (
 )
 from vehicle_link import VehicleLink
 from fsm_message_adapter import build_run_start, build_task4
+from course_config import fingerprint
 
 
 MISSION_TOPICS = {
@@ -36,6 +37,7 @@ MISSION_TOPICS = {
     "task_report": "/tongji_mrl/mission/task_report",
     "fault": "/tongji_mrl/mission/fault",
 }
+RUNSTART_PENDING_TIMEOUT_S = 15.0
 
 
 class Ros2MissionLink:
@@ -194,9 +196,16 @@ class OcsGateway:
             team_id=team_id,
             mission_coordinator=mission_coordinator,
         )
-        self.ros2 = Ros2MissionLink(self.ocs.accept_fsm_status, self.ocs.accept_fsm_task_report, self.ocs.accept_fsm_fault)
+        self._start_lock = threading.RLock()
+        self._clock = time.monotonic
+        self.startup_state = "WAIT_COURSE"
+        self.startup_reason = "waiting for valid retained RxCourse"
         self.pending_course: dict | None = None
+        self.course_published_fingerprint: str | None = None
         self.pending_control_actions: list[dict] = []
+        self._pending_run_starts: list[dict] = []
+        self._published_run_starts: list[dict] = []
+        self.ros2 = Ros2MissionLink(self._on_fsm_status, self.ocs.accept_fsm_task_report, self._on_fsm_fault)
         self.vehicle_link = VehicleLink(
             internal_broker,
             internal_port,
@@ -213,6 +222,27 @@ class OcsGateway:
         # Course is synchronized through the retained ROS 2 publisher only.
         self.ocs.queue_course_sync()
 
+    def _set_startup_state(self, state: str, reason: str) -> None:
+        if (self.startup_state, self.startup_reason) != (state, reason):
+            print(f"[Startup] {state}: {reason}")
+        self.startup_state, self.startup_reason = state, reason
+
+    def _on_fsm_status(self, raw: str) -> None:
+        self.ocs.accept_fsm_status(raw)
+        with self._start_lock:
+            if self.ocs.is_current_course_ready():
+                self._set_startup_state(
+                    "COURSE_READY" if self.ocs.declaration_seq is not None else "COURSE_VALID",
+                    "FSM applied the current Course fingerprint",
+                )
+            self._release_pending_run_starts()
+            self._confirm_run_start_from_status()
+
+    def _on_fsm_fault(self, raw: str) -> None:
+        self.ocs.accept_fsm_fault(raw)
+        with self._start_lock:
+            self._set_startup_state("FAULT", "FSM reported a fault")
+
     def publish_declaration(
         self,
         vehicle_ids: list[str],
@@ -226,27 +256,102 @@ class OcsGateway:
             uav_geofence_max_altitude_hae_m=uav_geofence_max_altitude_hae_m,
             uav_pilot_callsign=uav_pilot_callsign,
         )
+        with self._start_lock:
+            if self.ocs.is_current_course_ready():
+                self._set_startup_state("COURSE_READY", "declaration matches FSM-applied Course")
+            else:
+                self._set_startup_state("DECLARED", "declaration sent; waiting for FSM Course-ready ACK")
 
     def flush_commands(self) -> None:
-        for action in self.ocs.drain_internal_actions():
-            if action.get("vehicle_id") != self.ocs.mission_coordinator:
-                raise ValueError(
-                    "OCS gateway refuses to send a command directly to a non-USV vehicle"
-                )
-            if action.get("kind") == "course_config":
-                self.pending_course = action["payload"]
-            else:
-                sent, reason = self.ros2.publish_action(action)
-                if not sent:
-                    print(f"[ROS2] action {action.get('command')} not published: {reason}")
-                    self.pending_control_actions.append({"action": action, "state": "NOT_SUBMITTED", "reason": reason})
+        with self._start_lock:
+            controls: list[dict] = []
+            for action in self.ocs.drain_internal_actions():
+                if action.get("vehicle_id") != self.ocs.mission_coordinator:
+                    raise ValueError(
+                        "OCS gateway refuses to send a command directly to a non-USV vehicle"
+                    )
+                if action.get("kind") == "course_config":
+                    self.pending_course = action["payload"]
+                    self.course_published_fingerprint = None
+                    self._set_startup_state("COURSE_VALID", "valid Course received; awaiting ROS2 publication and FSM ACK")
                 else:
-                    self.pending_control_actions.append({"action": action, "state": "SUBMITTED_UNCONFIRMED", "reason": None})
-        if self.pending_course is not None:
-            if self.ros2.publish_course(self.pending_course):
-                self.pending_course = None
-            elif self.ros2.available:
-                print("[ROS2] Course pending: no matching FSM subscriber")
+                    controls.append(action)
+            if self.pending_course is not None:
+                if self.ros2.publish_course(self.pending_course):
+                    self.course_published_fingerprint = fingerprint(self.pending_course)
+                    self.pending_course = None
+                elif self.ros2.available:
+                    print("[ROS2] Course pending: no matching FSM subscriber")
+            for action in controls:
+                if action.get("command") == "RUN_START":
+                    record = {
+                        "action": action,
+                        "state": "BLOCKED_COURSE_READY_ACK",
+                        "reason": "waiting for a fresh, matching FSM Course-applied ACK",
+                        "received_monotonic": self._clock(),
+                    }
+                    self.pending_control_actions.append(record)
+                    self._pending_run_starts.append(record)
+                    self._set_startup_state("RUNSTART_RECEIVED", "official RunStart validated and held for Course-ready ACK")
+                else:
+                    sent, reason = self.ros2.publish_action(action)
+                    if not sent:
+                        print(f"[ROS2] action {action.get('command')} not published: {reason}")
+                        self.pending_control_actions.append({"action": action, "state": "NOT_SUBMITTED", "reason": reason})
+                    else:
+                        self.pending_control_actions.append({"action": action, "state": "SUBMITTED_UNCONFIRMED", "reason": None})
+            self._release_pending_run_starts()
+
+    def _release_pending_run_starts(self) -> None:
+        """Release only matching, fresh RunStart records after an FSM Course ACK."""
+        now = self._clock()
+        remaining: list[dict] = []
+        for record in self._pending_run_starts:
+            action = record["action"]
+            if now - record["received_monotonic"] > RUNSTART_PENDING_TIMEOUT_S:
+                record.update(state="BLOCKED_RUNSTART_TIMEOUT", reason="Course-ready ACK did not arrive before timeout")
+                self._set_startup_state("BLOCKED", record["reason"])
+                continue
+            course_fingerprint = action.get("course_fingerprint")
+            if course_fingerprint != self.ocs.course_fingerprint:
+                record.update(state="BLOCKED_COURSE_CHANGED", reason="RunStart Course is no longer current")
+                self._set_startup_state("BLOCKED", record["reason"])
+                continue
+            if self.course_published_fingerprint != course_fingerprint:
+                record.update(state="BLOCKED_COURSE_NOT_PUBLISHED", reason="current Course has not been published to ROS2")
+                self._set_startup_state("BLOCKED", record["reason"])
+                remaining.append(record)
+                continue
+            if not self.ocs.is_current_course_ready(course_fingerprint):
+                remaining.append(record)
+                continue
+            sent, reason = self.ros2.publish_action(action)
+            if not sent:
+                record.update(state="BLOCKED_RUNSTART_NOT_PUBLISHED", reason=reason)
+                self._set_startup_state("BLOCKED", str(reason))
+                remaining.append(record)
+                continue
+            record.update(state="RUNSTART_PUBLISHED_UNCONFIRMED", reason="ROS2 published; awaiting explicit FSM RunStart ACK")
+            self._published_run_starts.append(record)
+            self._set_startup_state("RUNSTART_RECEIVED", record["reason"])
+        self._pending_run_starts = remaining
+
+    def _confirm_run_start_from_status(self) -> None:
+        """Accept only the future explicit RunStart ACK contract from the FSM."""
+        status = self.ocs.latest_fsm_status
+        if not isinstance(status, dict) or status.get("simulation") is True:
+            return
+        ack = status.get("run_start")
+        if not isinstance(ack, dict) or ack.get("accepted") is not True or ack.get("application_state") != "APPLIED":
+            return
+        for record in self._published_run_starts:
+            action = record["action"]
+            expected_id = f"robocommand:{action.get('run_id')}:{action.get('command_seq')}:run-start"
+            if (ack.get("run_id") == action.get("run_id") and
+                    ack.get("official_command_seq") == action.get("command_seq") and
+                    ack.get("command_id") == expected_id):
+                record.update(state="RUNNING", reason="FSM explicitly acknowledged applied RunStart")
+                self._set_startup_state("RUNNING", record["reason"])
 
     def run(self, duration: float = 0.0) -> None:
         deadline = time.monotonic() + duration if duration else None

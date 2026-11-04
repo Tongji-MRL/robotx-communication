@@ -1,11 +1,13 @@
 import json
 import time
+import threading
 import types
 import unittest
 
 import ocs_client
-from ocs_gateway import Ros2MissionLink
-from robotx import rx_commands_pb2, rx_common_pb2, rx_course_pb2
+from course_config import fingerprint, make_payload
+from ocs_gateway import OcsGateway, Ros2MissionLink
+from robotx import rx_commands_pb2, rx_common_pb2, rx_course_pb2, rx_reports_pb2, rx_requests_pb2
 
 
 class OcsClientTests(unittest.TestCase):
@@ -25,24 +27,40 @@ class OcsClientTests(unittest.TestCase):
             return original(vehicle_ids, *args, **kwargs)
         self.client.publish_run_declaration = declare_for_test
         self._publish_declaration = original
+        self._accept_course_for_test()
+        self.client.drain_internal_actions()
 
     def message(self, topic, payload):
         return types.SimpleNamespace(topic=topic, payload=payload)
 
+    def _accept_course_for_test(self, course_id="RX2026-A", sent_at=None):
+        course = rx_course_pb2.RxCourse(course_id=course_id, pinger_freq_hz=27000)
+        for latitude, longitude in ((1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)):
+            course.corners.add(latitude=latitude, longitude=longitude)
+        if sent_at is not None:
+            course.sent_at.seconds = sent_at
+        self.client._accept_course(course)
+        return course
+
     def test_course_is_saved_and_matching_run_start_is_accepted(self) -> None:
-        course = rx_course_pb2.RxCourse(course_id="RX2026-A", pinger_freq_hz=27000)
+        course = rx_course_pb2.RxCourse(course_id="RX2026-B", pinger_freq_hz=27000)
         course.corners.add(latitude=1.0, longitude=2.0)
         course.corners.add(latitude=1.0, longitude=3.0)
         course.corners.add(latitude=2.0, longitude=3.0)
         course.corners.add(latitude=1.0, longitude=2.0)
+        course.sent_at.seconds = 1
         self.client._on_message(None, None, self.message("robocommand/robotx/course", course.SerializeToString()))
-        self.assertEqual(self.client.course.course_id, "RX2026-A")
-        self.assertEqual(self.client.course_store.get().course_id, "RX2026-A")
+        self.assertEqual(self.client.course.course_id, "RX2026-B")
+        self.assertEqual(self.client.course_store.get().course_id, "RX2026-B")
         course_actions = self.client.drain_internal_actions()
         self.assertEqual(course_actions[0]["kind"], "course_config")
         self.assertEqual(course_actions[0]["payload"]["corners"][0], {"latitude": 1.0, "longitude": 2.0})
 
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        decoded_declaration = rx_requests_pb2.RxRequest()
+        decoded_declaration.ParseFromString(self.published[-1][1].SerializeToString())
+        self.assertEqual(decoded_declaration.WhichOneof("body"), "run_declaration")
+        self.assertEqual(decoded_declaration.team_id, "TONG")
         command = rx_commands_pb2.RxCommand(
             team_id="TONG",
             seq=1,
@@ -145,7 +163,12 @@ class OcsClientTests(unittest.TestCase):
         self.assertEqual(self.client.drain_internal_actions(), [])
 
     def test_run_start_without_course_is_rejected_before_relay(self) -> None:
-        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.course = None
+        self.client.course_store = ocs_client.CourseStore()
+        self.client._course_fingerprint = None
+        with self.assertRaisesRegex(ValueError, "valid current RxCourse"):
+            self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.declaration_seq = 1
         command = rx_commands_pb2.RxCommand(
             team_id="TONG", seq=1,
             run_start=rx_commands_pb2.RunStart(
@@ -157,6 +180,193 @@ class OcsClientTests(unittest.TestCase):
         self.assertIsNone(self.client.run_id)
         self.assertEqual(self.client.drain_internal_actions(), [])
         self.assertEqual(self.client.last_rejection_reason, "RunStart received before a valid RxCourse")
+
+    def test_course_update_invalidates_old_declaration_and_stale_update_is_rejected(self) -> None:
+        self._accept_course_for_test(course_id="RX2026-A", sent_at=10)
+        self.client.drain_internal_actions()
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        old_declaration = self.client.declaration_seq
+        self._accept_course_for_test(course_id="RX2026-B", sent_at=11)
+        self.assertIsNone(self.client.declaration_seq)
+        self.assertEqual(self.client._declared_vehicle_ids, set())
+        with self.assertRaisesRegex(ValueError, "before a RunDeclaration"):
+            self.client._accept_command(rx_commands_pb2.RxCommand(
+                team_id="TONG", seq=1,
+                run_start=rx_commands_pb2.RunStart(declaration_seq=old_declaration, run_id=42),
+            ))
+        with self.assertRaisesRegex(ValueError, "stale or out of order"):
+            self._accept_course_for_test(course_id="RX2026-C", sent_at=10)
+        with self.assertRaisesRegex(ValueError, "missing sent_at"):
+            self._accept_course_for_test(course_id="RX2026-D")
+
+    def test_reconnect_clears_pre_run_course_and_restores_required_subscriptions(self) -> None:
+        self.assertIsNotNone(self.client.course_store.get())
+        self.client._on_disconnect(None, None, None, 1)
+        self.assertIsNone(self.client.course_store.get())
+        with self.assertRaisesRegex(ValueError, "valid current RxCourse"):
+            self.client.publish_run_declaration(["T-Sky"])
+        subscriptions = []
+        self.client._on_connect(types.SimpleNamespace(subscribe=lambda topics: subscriptions.append(topics)), None, None, 0)
+        self.assertEqual(subscriptions, [[("robocommand/robotx/course", 1), (self.client.command_topic, 1)]])
+
+    def test_reconnect_invalidates_course_ack_for_held_run_start_until_course_reappears(self) -> None:
+        status = {
+            "schema_version": "twave-mission-status-v2", "timestamp": "2026-11-05T00:00:00Z",
+            "fsm_state": "WAIT_RUN_START", "run_id": None,
+            "course": {"course_id": "RX2026-A", "fingerprint": self.client.course_fingerprint,
+                       "fsm_accepted": True, "applied": True},
+            "safety": {}, "vehicles": {}, "legacy": {},
+        }
+        self.client.accept_fsm_status(json.dumps(status))
+        self.assertTrue(self.client.is_current_course_ready())
+        self.client.run_id = 42  # Official RunStart received, but not internally released.
+        self.client._on_disconnect(None, None, None, 1)
+        self.assertFalse(self.client.is_current_course_ready())
+        self._accept_course_for_test()
+        self.client.accept_fsm_status(json.dumps(status))
+        self.assertTrue(self.client.is_current_course_ready())
+
+    def test_gateway_publishes_course_before_blocking_run_start_without_fsm_ack(self) -> None:
+        payload = make_payload(course_id="RX2026-A", pinger_freq_hz=27000,
+                               corners=[(1, 2), (1, 3), (2, 3), (1, 2)], source_sent_at=None)
+        course_action = {"kind": "course_config", "vehicle_id": "T-Wave", "payload": payload}
+        run_action = {"kind": "internal_command", "vehicle_id": "T-Wave", "command": "RUN_START", "run_id": 42,
+                      "command_seq": 1, "course_fingerprint": fingerprint(payload)}
+        events = []
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = types.SimpleNamespace(
+            mission_coordinator="T-Wave", drain_internal_actions=lambda: [course_action, run_action],
+            course_fingerprint=fingerprint(payload), is_current_course_ready=lambda *_args: False,
+        )
+        gateway.ros2 = types.SimpleNamespace(
+            available=True,
+            publish_course=lambda payload: events.append(("course", payload)) or True,
+            publish_action=lambda action: events.append(("action", action)) or (True, None),
+        )
+        gateway._start_lock = threading.RLock()
+        gateway._clock = time.monotonic
+        gateway.startup_state = "WAIT_COURSE"
+        gateway.startup_reason = "test"
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = None
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+        gateway.flush_commands()
+        self.assertEqual(events, [("course", course_action["payload"])])
+        self.assertEqual(gateway.pending_control_actions[0]["state"], "BLOCKED_COURSE_READY_ACK")
+
+    def test_matching_fsm_course_ack_releases_run_start_once(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.queue_course_sync()
+        self.client._accept_command(rx_commands_pb2.RxCommand(
+            team_id="TONG", seq=1,
+            run_start=rx_commands_pb2.RunStart(declaration_seq=self.client.declaration_seq, run_id=42),
+        ))
+        events = []
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = self.client
+        gateway.ros2 = types.SimpleNamespace(
+            available=True,
+            publish_course=lambda payload: events.append(("course", payload)) or True,
+            publish_action=lambda action: events.append(("run_start", action)) or (True, None),
+        )
+        gateway._start_lock = threading.RLock()
+        gateway._clock = time.monotonic
+        gateway.startup_state = "DECLARED"
+        gateway.startup_reason = "test"
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = None
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+        gateway.flush_commands()
+        self.assertEqual([item[0] for item in events], ["course"])
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "BLOCKED_COURSE_READY_ACK")
+
+        status = {
+            "schema_version": "twave-mission-status-v2", "timestamp": "2026-11-05T00:00:00Z",
+            "fsm_state": "WAIT_RUN_START", "run_id": None,
+            "course": {"course_id": "RX2026-A", "fingerprint": self.client.course_fingerprint,
+                       "fsm_accepted": True, "applied": True},
+            "safety": {}, "vehicles": {}, "legacy": {},
+        }
+        gateway._on_fsm_status(json.dumps(status))
+        self.assertEqual([item[0] for item in events], ["course", "run_start"])
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "RUNSTART_PUBLISHED_UNCONFIRMED")
+        status["run_start"] = {
+            "run_id": 42, "official_command_seq": 1,
+            "command_id": "robocommand:42:1:run-start",
+            "accepted": True, "application_state": "APPLIED",
+        }
+        gateway._on_fsm_status(json.dumps(status))
+        self.assertEqual([item[0] for item in events], ["course", "run_start"])
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "RUNNING")
+        self.assertEqual(gateway.startup_state, "RUNNING")
+
+    def test_old_or_unapplied_fsm_course_ack_does_not_release_run_start(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.queue_course_sync()
+        self.client._accept_command(rx_commands_pb2.RxCommand(
+            team_id="TONG", seq=1,
+            run_start=rx_commands_pb2.RunStart(declaration_seq=self.client.declaration_seq, run_id=42),
+        ))
+        events = []
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = self.client
+        gateway.ros2 = types.SimpleNamespace(
+            available=True, publish_course=lambda payload: events.append(("course", payload)) or True,
+            publish_action=lambda action: events.append(("run_start", action)) or (True, None),
+        )
+        gateway._start_lock = threading.RLock()
+        gateway._clock = time.monotonic
+        gateway.startup_state = "DECLARED"
+        gateway.startup_reason = "test"
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = None
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+        gateway.flush_commands()
+        gateway._on_fsm_status(json.dumps({
+            "schema_version": "twave-mission-status-v2", "timestamp": "2026-11-05T00:00:00Z",
+            "fsm_state": "WAIT_RUN_START", "run_id": None,
+            "course": {"course_id": "RX2026-A", "fingerprint": "old-fingerprint",
+                       "fsm_accepted": True, "applied": True},
+            "safety": {}, "vehicles": {}, "legacy": {},
+        }))
+        self.assertEqual([item[0] for item in events], ["course"])
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "BLOCKED_COURSE_READY_ACK")
+
+    def test_pending_run_start_expires_without_course_ready_ack(self) -> None:
+        payload = make_payload(course_id="RX2026-A", pinger_freq_hz=27000,
+                               corners=[(1, 2), (1, 3), (2, 3), (1, 2)], source_sent_at=None)
+        course_fingerprint = fingerprint(payload)
+        action = {"kind": "internal_command", "vehicle_id": "T-Wave", "command": "RUN_START",
+                  "run_id": 42, "command_seq": 1, "course_fingerprint": course_fingerprint}
+        now = [0.0]
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = types.SimpleNamespace(
+            mission_coordinator="T-Wave", drain_internal_actions=lambda: [action],
+            course_fingerprint=course_fingerprint, is_current_course_ready=lambda *_args: False,
+        )
+        gateway.ros2 = types.SimpleNamespace(available=True, publish_course=lambda _payload: True,
+                                             publish_action=lambda _action: (True, None))
+        gateway._start_lock = threading.RLock()
+        gateway._clock = lambda: now[0]
+        gateway.startup_state = "COURSE_READY"
+        gateway.startup_reason = "test"
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = course_fingerprint
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+        gateway.flush_commands()
+        now[0] = 16.0
+        gateway.ocs.drain_internal_actions = lambda: []
+        gateway.flush_commands()
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "BLOCKED_RUNSTART_TIMEOUT")
+        self.assertEqual(gateway.startup_state, "BLOCKED")
 
     def test_vehicle_task_report_is_converted_only_when_official_report_is_present(self) -> None:
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
@@ -285,6 +495,7 @@ class OcsClientTests(unittest.TestCase):
             course.corners.add(latitude=latitude, longitude=longitude)
         for latitude, longitude in ((0.9, 1.9), (0.9, 2.1), (1.1, 2.1), (0.9, 1.9)):
             course.uav_transit_area.add(latitude=latitude, longitude=longitude)
+        course.sent_at.seconds = 1
         self.client._accept_course(course)
         payload = self.client.drain_internal_actions()[0]["payload"]
         self.assertEqual(len(payload["corners"]), 4)
@@ -348,7 +559,10 @@ class OcsClientTests(unittest.TestCase):
 
         self.assertEqual(self.client.publish_cached_heartbeats(), 2)
         reports = {message.vehicle_id: message for _topic, message in self.published[1:]}
+        decoded_sky = rx_reports_pb2.RxReport()
+        decoded_sky.ParseFromString(reports["T-Sky"].SerializeToString())
         self.assertEqual(reports["T-Sky"].heartbeat.uav_registration, "CAAS-CACHED-001")
+        self.assertEqual(decoded_sky.heartbeat.uav_registration, "CAAS-CACHED-001")
         self.assertEqual(reports["T-Wave"].heartbeat.uav_registration, "")
 
 

@@ -21,10 +21,10 @@ from typing import Iterable, Mapping, Sequence
 
 try:
     from .course_store import CourseStore
-    from .course_config import make_payload, fingerprint
+    from .course_config import make_payload, fingerprint, validate_geofence_within_course
 except ImportError:  # Script/test execution directly from the OCS directory.
     from course_store import CourseStore
-    from course_config import make_payload, fingerprint
+    from course_config import make_payload, fingerprint, validate_geofence_within_course
 
 try:
     import paho.mqtt.client as mqtt
@@ -54,6 +54,8 @@ from robotx import rx_reports_pb2, rx_requests_pb2  # noqa: E402
 
 TOPIC_ROOT = "robocommand/robotx"
 DEFAULT_CONFIG = HERE / "config.example.json"
+FSM_STATUS_SCHEMA = "twave-mission-status-v2"
+COURSE_READY_ACK_MAX_AGE_S = 5.0
 
 TIER_MAP = {
     "unknown": common_pb2.TIER_UNKNOWN,
@@ -160,6 +162,11 @@ class OcsClient:
         self.course: rx_course_pb2.RxCourse | None = None
         self.course_store = CourseStore()
         self._course_fingerprint: str | None = None
+        self._declaration_course_fingerprint: str | None = None
+        self._course_ready_fingerprint: str | None = None
+        self._course_ready_received_monotonic: float | None = None
+        self._course_connection_epoch = 0
+        self._course_received_epoch: int | None = None
         self.last_rejection_reason: str | None = None
         self.last_command: rx_commands_pb2.RxCommand | None = None
         self._last_command_seq = 0
@@ -196,6 +203,11 @@ class OcsClient:
     def command_topic(self) -> str:
         return f"{TOPIC_ROOT}/{self.team_id}/command"
 
+    @property
+    def course_fingerprint(self) -> str | None:
+        """Fingerprint of the only Course eligible for declaration/start gating."""
+        return self._course_fingerprint
+
     def connect(self) -> None:
         print(f"Connecting OCS to MQTT {self.broker_host}:{self.broker_port} ...")
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
@@ -217,6 +229,21 @@ class OcsClient:
 
     def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
         self.connected = False
+        # Any Course acknowledgement from the previous MQTT connection is no
+        # longer eligible to release a held RunStart.
+        self._course_connection_epoch += 1
+        self._course_ready_fingerprint = None
+        self._course_ready_received_monotonic = None
+        if self.run_id is None:
+            # A reconnect must receive the broker's retained Course again before
+            # a pre-run declaration or RunStart can be accepted.
+            self.course = None
+            self.course_store = CourseStore()
+            self._course_fingerprint = None
+            self.declaration_seq = None
+            self._declaration_course_fingerprint = None
+            self._course_received_epoch = None
+            self._declared_vehicle_ids.clear()
         self._record_runtime_event("mqtt", "disconnected", detail=str(reason_code))
         print(f"[MQTT] disconnected: {reason_code}")
 
@@ -270,6 +297,20 @@ class OcsClient:
             source_sent_at=source_sent_at,
         )
         new_fingerprint = fingerprint(payload)
+        existing = self.course_store.get()
+        if existing is not None and new_fingerprint != self._course_fingerprint:
+            if source_sent_at is None:
+                raise ValueError("updated RxCourse is missing sent_at; freshness cannot be verified")
+            if existing.sent_at is not None and source_sent_at <= existing.sent_at:
+                raise ValueError("updated RxCourse is stale or out of order")
+            if self.run_id is not None:
+                raise ValueError("RxCourse update during an active run is rejected")
+            # A changed Course invalidates any declaration made for the old one.
+            self.declaration_seq = None
+            self._declaration_course_fingerprint = None
+            self._declared_vehicle_ids.clear()
+            self._course_ready_fingerprint = None
+            self._course_ready_received_monotonic = None
         self.course = rx_course_pb2.RxCourse()
         self.course.CopyFrom(course)
         self.course_store.update(
@@ -279,6 +320,7 @@ class OcsClient:
             uav_transit_area=((point.latitude, point.longitude) for point in course.uav_transit_area),
             sent_at=source_sent_at,
         )
+        self._course_received_epoch = self._course_connection_epoch
         if new_fingerprint != self._course_fingerprint:
             self._course_fingerprint = new_fingerprint
             self._queue_internal_action({
@@ -314,6 +356,8 @@ class OcsClient:
         if body == "run_start":
             if self.declaration_seq is None:
                 raise ValueError("RunStart received before a RunDeclaration")
+            if self._declaration_course_fingerprint != self._course_fingerprint:
+                raise ValueError("RunStart received for a declaration not bound to the current RxCourse")
             if command.run_start.declaration_seq != self.declaration_seq:
                 raise ValueError("RunStart.declaration_seq does not match the declaration")
             if not command.run_start.run_id:
@@ -330,6 +374,7 @@ class OcsClient:
                 "run_id": self.run_id,
                 "command": "RUN_START",
                 "command_seq": command.seq,
+                "course_fingerprint": self._course_fingerprint,
                 "priority": "NORMAL",
                 "preempt": False,
                 "parameters": {"role": "mission_coordinator"},
@@ -474,11 +519,68 @@ class OcsClient:
             raise ValueError(f"unsupported vehicle message kind: {kind}")
 
     def accept_fsm_status(self, raw: str) -> None:
-        """Record an opaque, formal ROS 2 FSM status without changing its contract."""
+        """Record formal FSM status and accept only a current Course-applied ACK.
+
+        The status channel is the only source considered for Course readiness;
+        ROS subscription counts and successful publish calls are intentionally
+        not used as acknowledgements.
+        """
         value = json.loads(raw)
         if not isinstance(value, dict):
             raise ValueError("FSM status must be a JSON object")
         self.latest_fsm_status = value
+        self._course_ready_fingerprint = None
+        self._course_ready_received_monotonic = None
+        course = value.get("course")
+        if value.get("schema_version") != FSM_STATUS_SCHEMA:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="unexpected FSM status schema")
+            return
+        timestamp = value.get("timestamp")
+        if not isinstance(timestamp, str) or not timestamp:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM status is missing timestamp")
+            return
+        try:
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM status timestamp is invalid")
+            return
+        if value.get("simulation") is True:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="simulated FSM status is not a competition ACK")
+            return
+        active_course = self.course_store.get()
+        if active_course is None or self._course_fingerprint is None:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="no active OCS Course")
+            return
+        if not isinstance(course, Mapping):
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM status has no course object")
+            return
+        if course.get("course_id") != active_course.course_id:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM Course ID does not match OCS Course")
+            return
+        if course.get("fingerprint") != self._course_fingerprint:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM Course fingerprint does not match OCS Course")
+            return
+        if course.get("fsm_accepted") is not True or course.get("applied") is not True:
+            self._record_runtime_event("ros2", "course_ready_rejected", detail="FSM has not confirmed Course application")
+            return
+        self._course_ready_fingerprint = self._course_fingerprint
+        self._course_ready_received_monotonic = time.monotonic()
+        self._record_runtime_event("ros2", "course_ready_accepted", detail=active_course.course_id)
+
+    def is_current_course_ready(self, course_fingerprint: str | None = None) -> bool:
+        """Return true only for a fresh FSM-applied ACK of the active Course."""
+        expected = course_fingerprint or self._course_fingerprint
+        if (expected is None or expected != self._course_fingerprint or
+                self._course_ready_fingerprint != expected or
+                self._course_ready_received_monotonic is None or
+                self._course_received_epoch != self._course_connection_epoch):
+            return False
+        if time.monotonic() - self._course_ready_received_monotonic > COURSE_READY_ACK_MAX_AGE_S:
+            self._record_runtime_event("ros2", "course_ready_expired", detail="FSM Course-ready ACK timed out")
+            self._course_ready_fingerprint = None
+            self._course_ready_received_monotonic = None
+            return False
+        return True
 
     def accept_fsm_task_report(self, raw: str) -> None:
         """Consume an FSM ROS 2 report only when it explicitly carries an official report.
@@ -774,6 +876,9 @@ class OcsClient:
         uav_geofence_max_altitude_hae_m: float | None = None,
         uav_pilot_callsign: str | None = None,
     ) -> int:
+        course = self.course_store.get()
+        if course is None or self._course_fingerprint is None:
+            raise ValueError("RunDeclaration requires a valid current RxCourse")
         ids = [item.strip() for item in vehicle_ids if item.strip()]
         if not ids:
             raise ValueError("at least one vehicle_id is required")
@@ -784,6 +889,11 @@ class OcsClient:
         fence = [_lat_lng(lat, lng) for lat, lng in uav_geofence]
         if fence and fence[0] != fence[-1]:
             raise ValueError("uav_geofence must be a closed polygon (first point = last point)")
+        if fence:
+            validate_geofence_within_course(
+                course.corners,
+                ((point.latitude, point.longitude) for point in fence),
+            )
         if "T-Sky" in ids:
             if not fence:
                 raise ValueError("a declared UAV requires a non-empty uav_geofence")
@@ -821,6 +931,7 @@ class OcsClient:
             run_declaration=declaration,
         )
         self.declaration_seq = request.seq
+        self._declaration_course_fingerprint = self._course_fingerprint
         return self._publish(self.request_topic, request)
 
     def publish_heartbeat(
