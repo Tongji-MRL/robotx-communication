@@ -1,4 +1,5 @@
 import json
+import time
 import types
 import unittest
 
@@ -315,6 +316,40 @@ class OcsClientTests(unittest.TestCase):
         )
         action = self.client._relay_official_command(command)
         self.assertEqual(action["parameters"]["keep_out_radius_m"], 12.5)
+
+    def test_cached_heartbeat_preserves_uav_registration_without_affecting_usv(self) -> None:
+        self.client.publish_run_declaration(["T-Sky", "T-Wave"])
+        self.client.run_id = 42
+        sent_at = int(time.time() * 1000)
+
+        def heartbeat(vehicle_id, payload, message_id):
+            return {
+                "kind": "heartbeat", "vehicle_id": vehicle_id, "source": vehicle_id,
+                "run_id": 42, "message_id": message_id, "sent_at_unix_ms": sent_at,
+                "payload": payload,
+            }
+
+        common = {
+            "source_mode": "simulation", "state": "AUTO", "speed_mps": 3.0,
+            "heading_deg": 90.0, "roll_deg": 1.0, "pitch_deg": 2.0,
+            "position": {
+                "frame_id": "wgs84", "latitude_deg": 1.2,
+                "longitude_deg": 103.8, "altitude_hae_m": 12.0,
+            },
+            "health": {"fcu_connected": True, "simulator": True},
+        }
+        self.client.accept_vehicle_envelope(heartbeat("T-Sky", {
+            **common, "vehicle_type": "uav", "flight_phase": "airborne",
+            "uav_registration": "CAAS-CACHED-001",
+        }, "sky-cached-registration"))
+        self.client.accept_vehicle_envelope(heartbeat("T-Wave", {
+            **common, "vehicle_type": "usv",
+        }, "wave-no-registration"))
+
+        self.assertEqual(self.client.publish_cached_heartbeats(), 2)
+        reports = {message.vehicle_id: message for _topic, message in self.published[1:]}
+        self.assertEqual(reports["T-Sky"].heartbeat.uav_registration, "CAAS-CACHED-001")
+        self.assertEqual(reports["T-Wave"].heartbeat.uav_registration, "")
 
 
     def test_fsm_dry_run_readiness_cannot_reach_official_broker(self) -> None:

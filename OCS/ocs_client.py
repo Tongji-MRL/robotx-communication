@@ -594,6 +594,7 @@ class OcsClient:
                 altitude_hae_m=float(position["altitude_hae_m"]),
                 depth_m=float(payload.get("depth_m", 0.0)),
                 flight_phase=str(payload.get("flight_phase", "unknown")),
+                uav_registration=payload.get("uav_registration"),
             )
             count += 1
         return count
