@@ -1,0 +1,18 @@
+{
+  "internal_broker": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "purpose": "local_uav_status_test_only"
+  },
+  "vehicles": {
+    "uav": {
+      "vehicle_id": "T-Sky",
+      "source_vehicle_id": "UAV1",
+      "status_topic": "/tongji_mrl/tsky/uav_status"
+    }
+  },
+  "safety": {
+    "read_only": true,
+    "note": "No credentials, official RoboCommand endpoint, or flight-control command belongs in this template."
+  }
+}

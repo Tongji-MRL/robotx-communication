@@ -79,18 +79,17 @@ the monitor reconnect loop continues and no stale status is treated as live.
 
 ## Tests actually run
 
-* `..\.venv\Scripts\python.exe -m unittest discover -s OCS -p "test_*.py"`
-  - **PASS: 88 tests.** Includes existing OCS Client/Gateway/Course/RunStart
-    regression coverage, heartbeat timing tests, UAV JSON validation, explicit
-    mapping rejection, stale-state behavior, and proof that the new internal
-    status callback does not create an official heartbeat.
+* Clean commit `e60b340`, tested in a detached worktree with the repository's
+  Python environment: `..\.venv\Scripts\python.exe -m unittest discover -s
+  OCS -p "test_*.py"` - **PASS: 80 tests.** This includes existing OCS
+  Client/Gateway/Course/RunStart regression coverage plus UAV JSON validation,
+  explicit mapping rejection, stale-state behavior, and proof that the new
+  internal status callback does not create an official heartbeat. The separate
+  uncommitted QoS1 Heartbeat work adds tests and must not be counted here.
 * `git diff --check` - **PASS.**
 * Local UI availability check on `127.0.0.1:18080` with an intentionally
   unavailable MQTT endpoint (`127.0.0.1:19999`) - **PASS:** `/api/state`
   returned HTTP 200 with `broker_connected=false` and no fabricated UAV state.
-* `python -m py_compile ...` - source compilation reached a pre-existing
-  `OCS/__pycache__` lock (`Permission denied` on a temporary `.pyc` filename).
-  The test run above imported/executed the affected modules successfully.
 
 No live Ubuntu ROS2, Orin publisher, Mosquitto at `192.168.112.1:1884`, or
 RoboCommand server was contacted for this phase. Cross-device rate, broker
