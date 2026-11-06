@@ -37,7 +37,12 @@
       "task4": "disruptive"
     },
     "uav_geofence": [],
-    "note": "Task 4 is included as DISRUPTIVE. Fill the closed UAV geofence from the received RxCourse before an official run."
+    "note": "Auto candidate uses the inscribed Course-only region; review actual FCU/geofence and takeoff/landing, and set a real uav_pilot_callsign before --publish-declaration. Ground negative tests must be offline.",
+    "uav_geofence_mode": "auto_course",
+    "uav_geofence_margin_m": 2.0,
+    "uav_geofence_max_altitude_hae_m": 40.0,
+    "uav_geofence_altitude_limit_hae_m": 50.0,
+    "uav_pilot_callsign": ""
   },
   "task1": {
     "status_topic": "/safe_passage/mission_state",

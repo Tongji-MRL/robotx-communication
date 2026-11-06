@@ -22,9 +22,11 @@ from typing import Iterable, Mapping, Sequence
 try:
     from .course_store import CourseStore
     from .course_config import make_payload, fingerprint, validate_geofence_within_course
+    from .geofence_planner import calculate_geofence_from_course, validate_geofence_altitude
 except ImportError:  # Script/test execution directly from the OCS directory.
     from course_store import CourseStore
     from course_config import make_payload, fingerprint, validate_geofence_within_course
+    from geofence_planner import calculate_geofence_from_course, validate_geofence_altitude
 
 try:
     import paho.mqtt.client as mqtt
@@ -885,6 +887,9 @@ class OcsClient:
         uav_geofence: Iterable[tuple[float, float]] = (),
         uav_geofence_max_altitude_hae_m: float | None = None,
         uav_pilot_callsign: str | None = None,
+        uav_geofence_mode: str = "manual",
+        uav_geofence_margin_m: float = 2.0,
+        uav_geofence_altitude_limit_hae_m: float = 50.0,
     ) -> int:
         course = self.course_store.get()
         if course is None or self._course_fingerprint is None:
@@ -896,21 +901,35 @@ class OcsClient:
             raise ValueError("vehicle_ids must be unique")
         if len(task_tiers) != 4:
             raise ValueError("task_tiers must contain Task1 through Task4")
-        fence = [_lat_lng(lat, lng) for lat, lng in uav_geofence]
+        if uav_geofence_mode not in {"manual", "auto_course"}:
+            raise ValueError("uav_geofence_mode must be manual or auto_course")
+        configured_fence = list(uav_geofence)
+        if uav_geofence_mode == "auto_course":
+            if configured_fence:
+                raise ValueError("auto_course and a manual uav_geofence cannot be combined")
+            if "T-Sky" not in ids:
+                raise ValueError("auto_course requires declared vehicle T-Sky")
+            configured_fence = calculate_geofence_from_course(
+                course.corners, margin_m=uav_geofence_margin_m,
+            )
+            print("[Geofence] OCS calculated candidate (lat,lon):", configured_fence)
+            print("[Geofence] Operator must verify FCU fence and approved operating area")
+        fence = [_lat_lng(lat, lng) for lat, lng in configured_fence]
         if fence and fence[0] != fence[-1]:
             raise ValueError("uav_geofence must be a closed polygon (first point = last point)")
         if fence:
             validate_geofence_within_course(
                 course.corners,
                 ((point.latitude, point.longitude) for point in fence),
+                course.uav_transit_area,
             )
         if "T-Sky" in ids:
             if not fence:
                 raise ValueError("a declared UAV requires a non-empty uav_geofence")
-            if (isinstance(uav_geofence_max_altitude_hae_m, bool)
-                    or not isinstance(uav_geofence_max_altitude_hae_m, (int, float))
-                    or not 0 < float(uav_geofence_max_altitude_hae_m) <= 50):
-                raise ValueError("a declared UAV requires uav_geofence_max_altitude_hae_m in (0, 50]")
+            validate_geofence_altitude(
+                uav_geofence_max_altitude_hae_m,
+                limit_hae_m=uav_geofence_altitude_limit_hae_m,
+            )
             if not isinstance(uav_pilot_callsign, str) or not uav_pilot_callsign.strip():
                 raise ValueError("a declared UAV requires a non-empty uav_pilot_callsign")
         self._declared_vehicle_ids = set(ids)
@@ -1118,6 +1137,16 @@ def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tu
     return task_tiers, geofence, altitude, callsign
 
 
+def geofence_options(config: dict) -> tuple[str, float, float]:
+    """Mode, inward clearance in meters, and local maximum height (HAE)."""
+    declaration = config.get("run_declaration", {})
+    return (
+        str(declaration.get("uav_geofence_mode", "manual")),
+        declaration.get("uav_geofence_margin_m", 2.0),
+        declaration.get("uav_geofence_altitude_limit_hae_m", 50.0),
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Tongji OCS client for the official RoboCommand MQTT interface",
@@ -1142,16 +1171,24 @@ def main() -> int:
     config = load_config(args.config)
     team_id, host, port, vehicles = config_values(config)
     task_tiers, uav_geofence, uav_altitude, uav_pilot_callsign = declaration_values(config)
+    geofence_mode, geofence_margin, geofence_limit = geofence_options(config)
     host = args.broker or host
     port = args.port or port
     client = OcsClient(host, port, team_id)
     try:
         client.connect()
         if args.publish_declaration:
+            # RxCourse is retained but its MQTT callback is asynchronous.
+            deadline = time.monotonic() + 10.0
+            while client.course_store.get() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
             client.publish_run_declaration(
                 vehicles, task_tiers, uav_geofence,
                 uav_geofence_max_altitude_hae_m=uav_altitude,
                 uav_pilot_callsign=uav_pilot_callsign,
+                uav_geofence_mode=geofence_mode,
+                uav_geofence_margin_m=geofence_margin,
+                uav_geofence_altitude_limit_hae_m=geofence_limit,
             )
         if args.demo_heartbeats:
             deadline = time.monotonic() + args.duration

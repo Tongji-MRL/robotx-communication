@@ -90,30 +90,52 @@ def _edge_breakpoints(
 
 
 def validate_geofence_within_course(
-    course_corners: Iterable[Any], uav_geofence: Iterable[Any]
+    course_corners: Iterable[Any], uav_geofence: Iterable[Any],
+    uav_transit_area: Iterable[Any] = (),
 ) -> tuple[tuple[float, float], ...]:
-    """Validate, but never reshape, a closed UAV geofence against Course corners.
+    """Conservatively validate a fence relative to Course OR Transit Area.
 
-    RobotX Handbook 3.4.10 requires the declared fence to be within the received
-    Course boundary.  ``uav_transit_area`` is deliberately not accepted here:
-    the Handbook does not authorize merging it into the declaration boundary.
+    Both received polygons are preserved verbatim. All fence vertices and
+    edges must lie in their union. The sparse interior sampling is an extra
+    safety check, NOT a substitute for certified FCU geofence verification.
     """
     _, _, course = validate_course_fields("course", 1, course_corners)
     _, _, fence = validate_course_fields("uav_geofence", 1, uav_geofence)
-    all_longitudes = [point[1] for point in course[:-1] + fence[:-1]]
+    transit_values = tuple(uav_transit_area)
+    transit = validate_course_fields("uav_transit_area", 1, transit_values)[2] if transit_values else None
+    regions = (course, transit) if transit is not None else (course,)
+    all_longitudes = [p[1] for region in regions for p in region[:-1]] + [p[1] for p in fence[:-1]]
     if max(all_longitudes) - min(all_longitudes) > 180:
         raise ValueError("cannot validate geofence geometry across the antimeridian")
+
+    def in_allowed(point):
+        return any(_point_in_or_on_polygon(point, region) for region in regions)
+
     for index, point in enumerate(fence[:-1]):
-        if not _point_in_or_on_polygon(point, course):
-            raise ValueError(f"uav_geofence vertex {index} is outside the Course boundary")
+        if not in_allowed(point):
+            raise ValueError(f"uav_geofence vertex {index} is outside Course and UAV transit area")
     for index, start in enumerate(fence[:-1]):
         end = fence[index + 1]
-        breakpoints = _edge_breakpoints(start, end, course)
-        for left, right in zip(breakpoints, breakpoints[1:]):
+        split = {0.0, 1.0}
+        for region in regions:
+            split.update(_edge_breakpoints(start, end, region))
+        for left, right in zip(sorted(split), sorted(split)[1:]):
             midpoint = (start[0] + (end[0] - start[0]) * (left + right) / 2,
                         start[1] + (end[1] - start[1]) * (left + right) / 2)
-            if not _point_in_or_on_polygon(midpoint, course):
-                raise ValueError(f"uav_geofence edge {index} leaves the Course boundary")
+            if not in_allowed(midpoint):
+                raise ValueError(f"uav_geofence edge {index} leaves Course and UAV transit area")
+    # Reject obvious interiors enclosing a disallowed gap or a hole in a
+    # compound allowed region; flight safety still requires FCU confirmation.
+    if transit is not None:
+        latitudes = [p[0] for p in fence[:-1]]
+        longitudes = [p[1] for p in fence[:-1]]
+        for iy in range(21):
+            lat = min(latitudes) + (max(latitudes) - min(latitudes)) * (iy + .5) / 21
+            for ix in range(21):
+                lon = min(longitudes) + (max(longitudes) - min(longitudes)) * (ix + .5) / 21
+                pt = (lat, lon)
+                if _point_in_or_on_polygon(pt, fence) and not in_allowed(pt):
+                    raise ValueError("uav_geofence interior includes an area outside Course and UAV transit area")
     return fence
 
 

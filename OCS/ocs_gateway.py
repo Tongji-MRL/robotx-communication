@@ -22,6 +22,7 @@ from ocs_client import (
     OcsClient,
     config_values,
     declaration_values,
+    geofence_options,
     load_config,
 )
 from vehicle_link import VehicleLink
@@ -268,11 +269,17 @@ class OcsGateway:
         uav_geofence: list[tuple[float, float]],
         uav_geofence_max_altitude_hae_m: float | None,
         uav_pilot_callsign: str | None,
+        uav_geofence_mode: str = "manual",
+        uav_geofence_margin_m: float = 2.0,
+        uav_geofence_altitude_limit_hae_m: float = 50.0,
     ) -> None:
         self.ocs.publish_run_declaration(
             vehicle_ids, task_tiers, uav_geofence,
             uav_geofence_max_altitude_hae_m=uav_geofence_max_altitude_hae_m,
             uav_pilot_callsign=uav_pilot_callsign,
+            uav_geofence_mode=uav_geofence_mode,
+            uav_geofence_margin_m=uav_geofence_margin_m,
+            uav_geofence_altitude_limit_hae_m=uav_geofence_altitude_limit_hae_m,
         )
         with self._start_lock:
             if self.ocs.is_current_course_ready():
@@ -431,6 +438,7 @@ def main() -> int:
     internal_host = args.internal_broker or str(internal_config.get("host", "127.0.0.1"))
     internal_port = args.internal_port or int(internal_config.get("port", 1883))
     task_tiers, geofence, uav_altitude, uav_pilot_callsign = declaration_values(config)
+    geofence_mode, geofence_margin, geofence_limit = geofence_options(config)
     uav_source_vehicle_id = args.uav_source_vehicle_id or config.get("vehicles", {}).get("uav", {}).get("source_vehicle_id")
 
     gateway = OcsGateway(
@@ -449,8 +457,13 @@ def main() -> int:
     try:
         gateway.connect()
         if args.publish_declaration:
+            # Do not declare before the retained RxCourse arrives.
+            deadline = time.monotonic() + 10.0
+            while gateway.ocs.course_store.get() is None and time.monotonic() < deadline:
+                time.sleep(0.1)
             gateway.publish_declaration(
                 vehicles, task_tiers, geofence, uav_altitude, uav_pilot_callsign,
+                geofence_mode, geofence_margin, geofence_limit,
             )
         gateway.run(args.duration)
     except KeyboardInterrupt:
