@@ -185,6 +185,7 @@ class OcsClient:
         self.latest_fsm_status: dict | None = None
         self.latest_fsm_task_report: dict | None = None
         self.latest_fsm_fault: dict | None = None
+        self.latest_uav_status: dict | None = None
         self.runtime_events: list[dict[str, object]] = []
         self.connected = False
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -677,6 +678,15 @@ class OcsClient:
             self.heartbeat_cache.accept(envelope, active_run_id=self.run_id)
         except HeartbeatRejected as exc:
             print(f"[VehicleHeartbeat] rejected {envelope.get('vehicle_id')}: {exc}", file=sys.stderr)
+
+    def accept_uav_status(self, status: Mapping) -> None:
+        """Retain validated ROS2 UAV telemetry for diagnostics only.
+
+        The documented UAV JSON lacks authoritative roll/pitch/current-task,
+        so it must not be silently promoted to an official Heartbeat.
+        """
+        self.latest_uav_status = dict(status)
+        self._record_runtime_event("ros2", "uav_status_received", detail="official heartbeat blocked: missing authoritative attitude/task")
 
     def publish_cached_heartbeats(self) -> int:
         """Publish fresh telemetry at the gateway's 2 Hz timer cadence."""

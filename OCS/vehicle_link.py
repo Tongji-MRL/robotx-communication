@@ -24,8 +24,10 @@ except ImportError as exc:  # pragma: no cover
 from vehicle_protocol import command_payload, decode, encode, make_message, topic, topic_filter
 try:
     from .course_config import validate_payload
+    from .uav_status import normalize_uav_status
 except ImportError:
     from course_config import validate_payload
+    from uav_status import normalize_uav_status
 
 
 INTERNAL_COMMAND_TO_PROTOCOL = {
@@ -46,6 +48,7 @@ HEARTBEAT_TOPICS = {
     "/tongji_mrl/twave/heartbeat": "T-Wave",
     "/tongji_mrl/tsky/heartbeat": "T-Sky",
 }
+UAV_STATUS_TOPIC = "/tongji_mrl/tsky/uav_status"
 
 
 def heartbeat_envelope(mqtt_topic: str, raw: bytes | str, *, active_run_id: int | None = None) -> dict[str, Any]:
@@ -103,6 +106,8 @@ class VehicleLink:
         password: str | None = None,
         on_connect: Callable[[], None] | None = None,
         active_run_id: Callable[[], int | None] | None = None,
+        on_uav_status: Callable[[dict[str, Any]], None] | None = None,
+        uav_source_vehicle_id: str | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
@@ -114,6 +119,8 @@ class VehicleLink:
         )
         self.on_connect = on_connect
         self.active_run_id = active_run_id or (lambda: None)
+        self.on_uav_status = on_uav_status
+        self.uav_source_vehicle_id = uav_source_vehicle_id
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
@@ -129,6 +136,8 @@ class VehicleLink:
             return
         for mqtt_topic in self.subscription_topics:
             client.subscribe(mqtt_topic, qos=1)
+        if self.on_uav_status is not None and self.uav_source_vehicle_id:
+            client.subscribe(UAV_STATUS_TOPIC, qos=1)
         print(f"[MQTT] connected; observing {', '.join(self.subscription_topics)}")
         if self.on_connect is not None:
             self.on_connect()
@@ -139,6 +148,14 @@ class VehicleLink:
 
     def _on_message(self, _client, _userdata, message) -> None:
         try:
+            if message.topic == UAV_STATUS_TOPIC:
+                if self.on_uav_status is None or not self.uav_source_vehicle_id:
+                    raise ValueError("UAV status received without configured source vehicle_id mapping")
+                self.on_uav_status(normalize_uav_status(
+                    message.payload, source_vehicle_id=self.uav_source_vehicle_id,
+                ))
+                print("[RxVehicle] UAV status accepted for read-only cache")
+                return
             value = heartbeat_envelope(message.topic, message.payload, active_run_id=self.active_run_id())
             print(f"[RxVehicle] heartbeat vehicle={value.get('vehicle_id')} id={value.get('message_id')}")
             if self.on_message is not None:

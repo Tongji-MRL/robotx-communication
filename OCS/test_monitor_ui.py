@@ -1,8 +1,9 @@
 import time
 import unittest
 import json
+from types import SimpleNamespace
 
-from monitor_ui import MonitorState
+from monitor_ui import MonitorState, MqttMonitor, UAV_STATUS_MQTT_TOPIC
 from vehicle_link import heartbeat_envelope
 
 
@@ -35,7 +36,31 @@ class MonitorStateTests(unittest.TestCase):
         snapshot = state.snapshot()
         self.assertTrue(snapshot["vehicles"]["T-Wave"]["online"])
         self.assertEqual(snapshot["vehicles"]["T-Wave"]["heartbeat"]["state"], "AUTO")
+
+    def test_uav_status_is_displayed_separately_from_official_heartbeat(self):
+        raw = json.dumps({"vehicle_id": "UAV1", "vehicle_type": "uav", "state": "AUTO", "flight_phase": "AIRBORNE", "position": {"latitude": 1.2, "longitude": 103.8}, "altitude_hae_m": 20, "spd_mps": 4, "heading_deg": 90, "battery_status": {"remaining_percent": 70, "warning": "TEST/SIMULATED"}})
+        state = MonitorState()
+        state.note_uav_status(raw, source_vehicle_id="UAV1")
+        snapshot = state.snapshot()
+        self.assertTrue(snapshot["uav_status_online"])
+        self.assertEqual(snapshot["uav_status"]["battery_status"]["remaining_percent"], 70)
         self.assertEqual(snapshot["messages"][0]["direction"], "in")
+
+    def test_uav_status_stales_without_fabricating_heartbeat(self):
+        raw = json.dumps({"vehicle_id": "UAV1", "vehicle_type": "uav", "state": "AUTO", "flight_phase": "AIRBORNE", "position": {"latitude": 1.2, "longitude": 103.8}, "altitude_hae_m": 20, "spd_mps": 4, "heading_deg": 90})
+        state = MonitorState(stale_after_s=0.1)
+        state.note_uav_status(raw, source_vehicle_id="UAV1")
+        state.uav_status_received_monotonic -= 1.0
+        snapshot = state.snapshot()
+        self.assertFalse(snapshot["uav_status_online"])
+        self.assertIsNone(snapshot["uav_status"]["official_heartbeat"])
+
+    def test_mqtt_monitor_requires_explicit_uav_mapping(self):
+        state = MonitorState()
+        monitor = MqttMonitor(state, "127.0.0.1", 1884)
+        monitor._on_message(None, None, SimpleNamespace(topic=UAV_STATUS_MQTT_TOPIC, payload=b"{}"))
+        self.assertIsNone(state.snapshot()["uav_status"])
+        self.assertEqual(state.snapshot()["messages"][0]["direction"], "error")
 
     def test_outgoing_command_is_kept_in_command_history(self):
         state = MonitorState()

@@ -27,6 +27,7 @@ from ocs_client import (
 from vehicle_link import VehicleLink
 from fsm_message_adapter import build_run_start, build_task4
 from course_config import fingerprint
+from uav_status import normalize_uav_status
 
 
 MISSION_TOPICS = {
@@ -36,6 +37,7 @@ MISSION_TOPICS = {
     "status": "/tongji_mrl/mission/status",
     "task_report": "/tongji_mrl/mission/task_report",
     "fault": "/tongji_mrl/mission/fault",
+    "uav_status": "/tongji_mrl/tsky/uav_status",
 }
 RUNSTART_PENDING_TIMEOUT_S = 15.0
 
@@ -48,7 +50,8 @@ class Ros2MissionLink:
     is unavailable.  This class never falls back to MQTT for mission traffic.
     """
 
-    def __init__(self, on_status, on_task_report, on_fault=None) -> None:
+    def __init__(self, on_status, on_task_report, on_fault=None, on_uav_status=None,
+                 uav_source_vehicle_id: str | None = None) -> None:
         self.error: str | None = None
         self.available = False
         self._rclpy = None
@@ -79,6 +82,16 @@ class Ros2MissionLink:
                 node_self.create_subscription(String, MISSION_TOPICS["task_report"], lambda msg: self._safe_callback(on_task_report, msg.data, "task_report"), 10)
                 if on_fault is not None:
                     node_self.create_subscription(String, MISSION_TOPICS["fault"], lambda msg: self._safe_callback(on_fault, msg.data, "fault"), 10)
+                if on_uav_status is not None and uav_source_vehicle_id:
+                    uav_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                         durability=DurabilityPolicy.VOLATILE)
+                    def uav_callback(msg):
+                        try:
+                            on_uav_status(normalize_uav_status(msg.data, source_vehicle_id=uav_source_vehicle_id))
+                        except Exception as exc:
+                            self.error = f"invalid UAV status: {exc}"
+                            node_self.get_logger().warning(self.error)
+                    node_self.create_subscription(String, MISSION_TOPICS["uav_status"], uav_callback, uav_qos)
 
         try:
             rclpy.init(args=None)
@@ -189,6 +202,7 @@ class OcsGateway:
         internal_subscription_topic: str | None = None,
         internal_username: str | None = None,
         internal_password: str | None = None,
+        uav_source_vehicle_id: str | None = None,
     ) -> None:
         self.ocs = OcsClient(
             official_broker,
@@ -205,7 +219,9 @@ class OcsGateway:
         self.pending_control_actions: list[dict] = []
         self._pending_run_starts: list[dict] = []
         self._published_run_starts: list[dict] = []
-        self.ros2 = Ros2MissionLink(self._on_fsm_status, self.ocs.accept_fsm_task_report, self._on_fsm_fault)
+        self.ros2 = Ros2MissionLink(self._on_fsm_status, self.ocs.accept_fsm_task_report,
+                                    self._on_fsm_fault, self.ocs.accept_uav_status,
+                                    uav_source_vehicle_id=uav_source_vehicle_id)
         self.vehicle_link = VehicleLink(
             internal_broker,
             internal_port,
@@ -214,6 +230,8 @@ class OcsGateway:
             username=internal_username,
             password=internal_password,
             active_run_id=lambda: self.ocs.run_id,
+            on_uav_status=self.ocs.accept_uav_status,
+            uav_source_vehicle_id=uav_source_vehicle_id,
         )
 
     def connect(self) -> None:
@@ -383,6 +401,7 @@ def main() -> int:
     parser.add_argument("--internal-subscription-topic", default=None, help="heartbeat subscription filter (normally fixed formal topics)")
     parser.add_argument("--internal-username", help="internal MQTT username")
     parser.add_argument("--internal-password", help="internal MQTT password")
+    parser.add_argument("--uav-source-vehicle-id", help="explicit ROS2 UAV JSON vehicle_id mapping; subscription disabled when omitted")
     parser.add_argument("--duration", type=float, default=0.0, help="0 means continuous")
     parser.add_argument("--ros2-diagnose", action="store_true", help="read-only ROS2 discovery; never connects MQTT")
     parser.add_argument(
@@ -412,6 +431,7 @@ def main() -> int:
     internal_host = args.internal_broker or str(internal_config.get("host", "127.0.0.1"))
     internal_port = args.internal_port or int(internal_config.get("port", 1883))
     task_tiers, geofence, uav_altitude, uav_pilot_callsign = declaration_values(config)
+    uav_source_vehicle_id = args.uav_source_vehicle_id or config.get("vehicles", {}).get("uav", {}).get("source_vehicle_id")
 
     gateway = OcsGateway(
         official_broker=official_host,
@@ -424,6 +444,7 @@ def main() -> int:
         internal_subscription_topic=args.internal_subscription_topic,
         internal_username=args.internal_username,
         internal_password=args.internal_password,
+        uav_source_vehicle_id=uav_source_vehicle_id,
     )
     try:
         gateway.connect()

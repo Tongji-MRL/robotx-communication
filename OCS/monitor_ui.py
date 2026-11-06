@@ -25,11 +25,13 @@ except ImportError:  # pragma: no cover - exercised on installations without MQT
     mqtt = None
 
 try:
-    from .vehicle_link import HEARTBEAT_TOPICS, heartbeat_envelope
+    from .vehicle_link import HEARTBEAT_TOPICS, UAV_STATUS_TOPIC, heartbeat_envelope
     from .vehicle_protocol import command_payload, encode, make_message, topic
+    from .uav_status import normalize_uav_status
 except ImportError:  # script execution from the OCS directory
-    from vehicle_link import HEARTBEAT_TOPICS, heartbeat_envelope
+    from vehicle_link import HEARTBEAT_TOPICS, UAV_STATUS_TOPIC, heartbeat_envelope
     from vehicle_protocol import command_payload, encode, make_message, topic
+    from uav_status import normalize_uav_status
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +41,7 @@ STATUS_SCHEMA = "twave-mission-status-v2"
 MISSION_STATUS_TOPIC = "/tongji_mrl/mission/status"
 MISSION_REPORT_TOPIC = "/tongji_mrl/mission/task_report"
 MISSION_FAULT_TOPIC = "/tongji_mrl/mission/fault"
+UAV_STATUS_MQTT_TOPIC = UAV_STATUS_TOPIC
 
 
 def _empty_vehicle(vehicle_id: str) -> dict[str, Any]:
@@ -71,6 +74,8 @@ class MonitorState:
         }
         self.vehicles = {vehicle_id: _empty_vehicle(vehicle_id) for vehicle_id in VEHICLES}
         self.course: dict[str, Any] | None = None
+        self.uav_status: dict[str, Any] | None = None
+        self.uav_status_received_monotonic: float | None = None
         self.mission_status: dict[str, Any] | None = None
         self.mission_status_received_unix_ms: int | None = None
         # Wall-clock time is kept for the API/UI, but freshness must not be
@@ -134,6 +139,13 @@ class MonitorState:
                 f"{kind} · {vehicle_id or 'system'}",
                 {"topic": mqtt_topic, "message": deepcopy(dict(envelope))},
             )
+
+    def note_uav_status(self, raw: str | bytes, *, source_vehicle_id: str) -> None:
+        value = normalize_uav_status(raw, source_vehicle_id=source_vehicle_id)
+        with self.lock:
+            self.uav_status = value
+            self.uav_status_received_monotonic = time.monotonic()
+            self._append_message("in", "UAV status", {"topic": UAV_STATUS_MQTT_TOPIC, "payload": value})
 
     def ros2_event(self, *, available: bool, connected: bool, event: str) -> None:
         with self.lock:
@@ -240,12 +252,16 @@ class MonitorState:
                 max(0.0, now_monotonic - self.mission_status_received_monotonic), 2
             )
             mission_online = mission_age is not None and mission_age <= self.stale_after_s
+            uav_age = None if self.uav_status_received_monotonic is None else round(max(0.0, now_monotonic - self.uav_status_received_monotonic), 2)
             return {
                 "now_unix_ms": now_ms,
                 "uptime_s": round(time.time() - self.started_at, 1),
                 "broker": deepcopy(self.broker),
                 "vehicles": vehicles,
                 "course": deepcopy(self.course),
+                "uav_status": deepcopy(self.uav_status),
+                "uav_status_age_s": uav_age,
+                "uav_status_online": uav_age is not None and uav_age <= self.stale_after_s,
                 "mission": deepcopy(self.mission_status),
                 "mission_status": {"received": self.mission_status_received_unix_ms is not None, "last_received_unix_ms": self.mission_status_received_unix_ms, "age_s": mission_age, "online": mission_online, "status": "实时" if mission_online else ("超时" if mission_age is not None else "未收到")},
                 "fsm_task_report": deepcopy(self.fsm_task_report),
@@ -269,13 +285,15 @@ class MonitorState:
 
 class MqttMonitor:
     def __init__(self, state: MonitorState, host: str, port: int, username: str | None = None,
-                 password: str | None = None, enable_lab_commands: bool = False) -> None:
+                 password: str | None = None, enable_lab_commands: bool = False,
+                 uav_source_vehicle_id: str | None = None) -> None:
         self.state = state
         self.host = host
         self.port = port
         # The monitor is read-only in every mode.  This retained parameter only
         # avoids silently accepting legacy command-line invocations.
         self.enable_lab_commands = False
+        self.uav_source_vehicle_id = uav_source_vehicle_id
         self.client = None
         if mqtt is not None:
             self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -341,6 +359,8 @@ class MqttMonitor:
             return
         for mqtt_topic in HEARTBEAT_TOPICS:
             client.subscribe(mqtt_topic, qos=1)
+        if self.uav_source_vehicle_id:
+            client.subscribe(UAV_STATUS_MQTT_TOPIC, qos=1)
         self.state.broker_event(connected=True, host=self.host, port=self.port, event="内部 MQTT 已连接")
 
     def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
@@ -348,6 +368,11 @@ class MqttMonitor:
 
     def _on_message(self, _client, _userdata, message) -> None:
         try:
+            if message.topic == UAV_STATUS_MQTT_TOPIC:
+                if not self.uav_source_vehicle_id:
+                    raise ValueError("UAV source vehicle_id mapping is not configured")
+                self.state.note_uav_status(message.payload, source_vehicle_id=self.uav_source_vehicle_id)
+                return
             envelope = heartbeat_envelope(message.topic, message.payload)
             self.state.note_message(message.topic, envelope)
         except Exception as exc:
@@ -471,11 +496,13 @@ def main() -> int:
     parser.add_argument("--username")
     parser.add_argument("--password")
     parser.add_argument("--stale-after", type=float, default=3.0)
+    parser.add_argument("--uav-source-vehicle-id", help="required source vehicle_id for UAV status MQTT subscription")
     parser.add_argument("--enable-lab-commands", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     state = MonitorState(stale_after_s=args.stale_after)
-    monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password, args.enable_lab_commands)
+    monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password,
+                          args.enable_lab_commands, args.uav_source_vehicle_id)
     ros2_monitor = Ros2Monitor(state)
     handler = type("BoundUiHandler", (UiHandler,), {"state": state, "monitor": monitor})
     server = ThreadingHTTPServer((args.web_host, args.web_port), handler)
