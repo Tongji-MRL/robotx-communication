@@ -891,6 +891,28 @@ class OcsClient:
         uav_geofence_margin_m: float = 2.0,
         uav_geofence_altitude_limit_hae_m: float = 50.0,
     ) -> int:
+        declaration = self._build_run_declaration(
+            vehicle_ids, task_tiers, uav_geofence,
+            uav_geofence_max_altitude_hae_m=uav_geofence_max_altitude_hae_m,
+            uav_pilot_callsign=uav_pilot_callsign,
+            uav_geofence_mode=uav_geofence_mode,
+            uav_geofence_margin_m=uav_geofence_margin_m,
+            uav_geofence_altitude_limit_hae_m=uav_geofence_altitude_limit_hae_m,
+        )
+        return self._publish_run_declaration(declaration)
+
+    def _build_run_declaration(
+        self,
+        vehicle_ids: Sequence[str],
+        task_tiers: Sequence[int | str] = ("disruptive", "none", "disruptive", "disruptive"),
+        uav_geofence: Iterable[tuple[float, float]] = (),
+        uav_geofence_max_altitude_hae_m: float | None = None,
+        uav_pilot_callsign: str | None = None,
+        uav_geofence_mode: str = "manual",
+        uav_geofence_margin_m: float = 2.0,
+        uav_geofence_altitude_limit_hae_m: float = 50.0,
+    ) -> rx_requests_pb2.RunDeclaration:
+        """Validate a declaration without advancing sequences or publishing."""
         course = self.course_store.get()
         if course is None or self._course_fingerprint is None:
             raise ValueError("RunDeclaration requires a valid current RxCourse")
@@ -899,6 +921,9 @@ class OcsClient:
             raise ValueError("at least one vehicle_id is required")
         if len(set(ids)) != len(ids):
             raise ValueError("vehicle_ids must be unique")
+        # The official test server recognizes UAV-prefixed identifiers. Keep
+        # the team's legacy T-Sky ID covered by the same declaration checks.
+        has_declared_uav = any(item == "T-Sky" or item.startswith("UAV") for item in ids)
         if len(task_tiers) != 4:
             raise ValueError("task_tiers must contain Task1 through Task4")
         if uav_geofence_mode not in {"manual", "auto_course"}:
@@ -907,8 +932,8 @@ class OcsClient:
         if uav_geofence_mode == "auto_course":
             if configured_fence:
                 raise ValueError("auto_course and a manual uav_geofence cannot be combined")
-            if "T-Sky" not in ids:
-                raise ValueError("auto_course requires declared vehicle T-Sky")
+            if not has_declared_uav:
+                raise ValueError("auto_course requires a declared UAV (T-Sky or a UAV-prefixed vehicle_id)")
             configured_fence = calculate_geofence_from_course(
                 course.corners, margin_m=uav_geofence_margin_m,
             )
@@ -923,7 +948,7 @@ class OcsClient:
                 ((point.latitude, point.longitude) for point in fence),
                 course.uav_transit_area,
             )
-        if "T-Sky" in ids:
+        if has_declared_uav:
             if not fence:
                 raise ValueError("a declared UAV requires a non-empty uav_geofence")
             validate_geofence_altitude(
@@ -932,18 +957,7 @@ class OcsClient:
             )
             if not isinstance(uav_pilot_callsign, str) or not uav_pilot_callsign.strip():
                 raise ValueError("a declared UAV requires a non-empty uav_pilot_callsign")
-        self._declared_vehicle_ids = set(ids)
-        self.run_id = None
-        self.last_command = None
-        self._last_command_seq = 0
-        self._report_seq.clear()
-        self.heartbeat_cache = HeartbeatCache()
-        self._authoritative_current_task.clear()
-        self._pending_internal_actions.clear()
-        self._relayed_official_commands.clear()
-        self._readiness_reports.clear()
-        self._team_seq += 1
-        declaration = rx_requests_pb2.RunDeclaration(
+        return rx_requests_pb2.RunDeclaration(
             vehicle_ids=ids,
             task1_tier=_enum(task_tiers[0], TIER_MAP, "task1 tier"),
             task2_tier=_enum(task_tiers[1], TIER_MAP, "task2 tier"),
@@ -953,6 +967,28 @@ class OcsClient:
             uav_geofence_max_altitude_hae_m=float(uav_geofence_max_altitude_hae_m or 0),
             uav_pilot_callsign=(uav_pilot_callsign or "").strip(),
         )
+
+    def _publish_run_declaration(self, declaration: rx_requests_pb2.RunDeclaration,
+                                 *, preserve_report_sequences: bool = False) -> int:
+        """Send a prepared declaration; callers own its prior validation.
+
+        The public entry always uses _build_run_declaration. The dedicated
+        ground-test entry additionally supports explicit negative scenarios.
+        """
+        if self.course_store.get() is None or self._course_fingerprint is None:
+            raise ValueError("RunDeclaration requires a valid current RxCourse")
+        self._declared_vehicle_ids = set(declaration.vehicle_ids)
+        self.run_id = None
+        self.last_command = None
+        self._last_command_seq = 0
+        if not preserve_report_sequences:
+            self._report_seq.clear()
+        self.heartbeat_cache = HeartbeatCache()
+        self._authoritative_current_task.clear()
+        self._pending_internal_actions.clear()
+        self._relayed_official_commands.clear()
+        self._readiness_reports.clear()
+        self._team_seq += 1
         request = rx_requests_pb2.RxRequest(
             team_id=self.team_id,
             seq=self._team_seq,

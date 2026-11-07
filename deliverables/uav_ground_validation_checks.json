@@ -1,0 +1,16 @@
+{
+  "date": "2026-11-07",
+  "full_ocs_suite": {"tests": 138, "failures": 0, "errors": 0, "skipped": 0},
+  "command": ".venv/Scripts/python.exe -m unittest discover -s OCS -p test_*.py -q -b",
+  "official_reference_commit": "8fc09f295fe266ad8106cc0344a3e4d57f844359",
+  "official_declaration_validation": {
+    "normal": "accepted by official geofence_problems",
+    "outside-course": "only geofence containment rejected; baseline height preserved",
+    "over-height": "only ceiling rejected at 60 m HAE; valid baseline fence preserved"
+  },
+  "mqtt_integration": "Four actual loopback TCP/MQTT flows with mocked ROS input",
+  "normal_redeclaration_report_sequence": [1, 2, 3],
+  "live_ros_dds_tested": false,
+  "docker_deployment_tested": false,
+  "mdf_or_aircraft_tested": false
+}

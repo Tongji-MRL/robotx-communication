@@ -1,4 +1,6 @@
 .venv/
+.venv-ground/
+OCS/config.uav-ground.local.json
 __pycache__/
 *.py[cod]
 .pytest_cache/

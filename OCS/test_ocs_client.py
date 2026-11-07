@@ -512,6 +512,32 @@ class OcsClientTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "uav_geofence_max_altitude"):
             self._publish_declaration(["T-Sky"], uav_geofence=[(1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)], uav_pilot_callsign="TEST")
 
+    def test_uav_prefixed_declaration_enforces_fence_height_and_pilot(self) -> None:
+        valid = {
+            "task_tiers": ("none",) * 4,
+            "uav_geofence": [(1.0, 2.0), (1.0, 3.0), (2.0, 3.0), (1.0, 2.0)],
+            "uav_geofence_max_altitude_hae_m": 40.0,
+            "uav_pilot_callsign": "TEST-PILOT",
+        }
+        invalid = (
+            ({"uav_geofence": []}, "non-empty uav_geofence"),
+            ({"uav_geofence_max_altitude_hae_m": None}, "uav_geofence_max_altitude"),
+            ({"uav_geofence_max_altitude_hae_m": 51.0}, "height gate"),
+            ({"uav_pilot_callsign": " "}, "uav_pilot_callsign"),
+        )
+        for override, reason in invalid:
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, reason):
+                    self._publish_declaration(["UAV1"], **(valid | override))
+                self.assertEqual(self.published, [])
+                self.assertIsNone(self.client.declaration_seq)
+        self._publish_declaration(["UAV1"], **valid)
+        declaration = self.published[-1][1].run_declaration
+        self.assertEqual(list(declaration.vehicle_ids), ["UAV1"])
+        self.assertEqual(declaration.uav_geofence_max_altitude_hae_m, 40.0)
+        self.assertEqual(declaration.uav_pilot_callsign, "TEST-PILOT")
+        self.assertEqual(list(declaration.uav_geofence)[0], list(declaration.uav_geofence)[-1])
+
     def test_heartbeat_registration_and_moving_alert_radius_are_preserved(self) -> None:
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
         self.client.publish_heartbeat(

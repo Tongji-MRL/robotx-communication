@@ -1,5 +1,188 @@
 # UAV status test guide
 
+## UAV 单机 Ground Validation：完整官方通信流程
+
+此部分使用新增的 `OCS/uav_ground_validation.py`，主动向指定 RoboCommand 发布
+声明和真实遥测。默认 `--scenario normal`；越界和超高也使用同一个入口。
+后续章节保留原来的只读 Monitor 测试；两种入口用途不同。
+
+本入口按实际已测通的 ROS 2 上行链路接入：
+
+```text
+UAV Orin ROS 2 /tongji_mrl/tsky/uav_status
+  std_msgs/msg/String，data 为 JSON，vehicle_id=UAV1
+  -> ROS 2 / DDS
+  -> OCS uav_ground_validation.py (官方 vehicle_id=UAV1)
+  -> RoboCommand MQTT/Protobuf -> MDF
+```
+
+不启动 `uav_status_mqtt_bridge.py` 或内部 MQTT Broker。OCS 必须运行在能直接
+接收该 ROS 2 topic 的环境里。订阅 QoS 沿用现有 ROS 接口：RELIABLE、VOLATILE、
+depth=10。ROS 回调独立运行，将收到的 `message.data` 和接收时间交给主循环；
+Heartbeat 的 state、flight_phase、位置、速度、航向和 HAE 高度来自这些数据。
+
+程序自动完成以下顺序，无需另启 `ocs_gateway.py`、`vehicle_agent.py`、USV 或
+`dry_run.launch.py`：
+
+1. 连接官方 Broker，订阅 retained `robocommand/robotx/course` 和本队 command。
+2. 收到并校验 Course；使用现有围栏生成/验证函数。
+3. 发布只有 `UAV1` 的 `RxRequest.run_declaration`，四个 task tier 均为 NONE。
+4. 有新鲜 UAV 状态后，按 2 Hz 发布 `robocommand/robotx/TONG/UAV1/report`。
+5. 若收到 RunStart，校验 declaration_seq 并记录 run_id；持续地面遥测，不发布车辆命令。
+
+`run_id` 是 RunStart 和 OCS 本地会话/JSONL 中的字段；官方 `RxReport` 没有
+`run_id` 字段。报告序号按车辆递增，在同一个地面验证进程中重连或重新声明也不回退。
+
+RunStart 不是地面遥测的前提。程序直接转发 UAV 的 MANUAL/AUTO/KILLED 和
+GROUNDED/AIRBORNE，不为获得 RunStart 而强行改为 AUTO。地面观察期间
+`current_task=TASK_NONE`。不要同时运行另一个以同一 Team/vehicle 发布声明或
+官方心跳的 OCS 实例。
+
+本次使用官方模拟端时，对外 ID 采用 `UAV1`，使官方脚本执行 UAV 围栏/高度检查。
+`--vehicle-id` 只改对外 ID；`--source-vehicle-id` 必须匹配真实 ROS JSON。
+仍兼容 `T-Sky`，但该官方测试服务会跳过它的 UAV 检查。
+完整 Windows 配置、官方模拟启动及 SYS1/SYS2/SYS3 命令见
+[协作者交接手册](../deliverables/RobotX_UAV_Ground_Test_Windows_20261107.docx)。
+
+### 配置与启动
+
+新模板 `OCS/config.uav-ground.example.json` 只含 UAV。可以复制到本机的私有
+配置位置，再用 `--config` 指向它。需要填写官方 Broker、实际
+pilot callsign，核对 `UAV1 -> UAV1` 与 MDF 上的飞机身份；如 MDF 需要机身注册号，
+填写 `vehicles.uav.uav_registration` 或 `--uav-registration`。
+
+围栏配置复用 `run_declaration` 中的既有参数。`auto_course` 自动生成候选围栏；
+若使用已经验证的手工围栏，设 `uav_geofence_mode=manual` 并提供闭合坐标数组。
+模板的 40 m HAE 和 50 m HAE 只是测试配置，不代表现场 SV 空域批准高度。
+请沿用已经核实的围栏、高度和高度基准；提交对象是收到的当前 Course。
+
+先加载本机已测通的 ROS 2 环境，沿用与 UAV 通信时的 `ROS_DOMAIN_ID`、RMW 和
+网络设置。使用同一终端检查消息类型、发布 QoS 和数据更新：
+
+```text
+ros2 topic type /tongji_mrl/tsky/uav_status
+ros2 topic info /tongji_mrl/tsky/uav_status --verbose
+ros2 topic echo /tongji_mrl/tsky/uav_status
+```
+
+预期类型为 `std_msgs/msg/String`，其中 JSON 身份为 `UAV1`。发布端必须与上述
+订阅 QoS 兼容；本入口沿用仓库现有 String 接口，不解析其他自定义 ROS 消息类型。
+运行程序的 Python 必须同时能导入 `rclpy`、`std_msgs.msg`、`paho.mqtt.client`
+和 `google.protobuf`。在该 Python 环境安装 `OCS/requirements.txt` 的依赖。
+
+从仓库根目录运行（替换尖括号参数；Windows 必须已加载 ROS 2 环境）：
+
+```powershell
+.\scripts\start_uav_ground_validation.bat `
+  --official-broker <RoboCommand_IP> `
+  --pilot-callsign "<实际飞手标识>" `
+  --uav-registration "<实际机身注册号>" `
+  --log logs/uav-ground-validation.jsonl
+```
+
+命令行覆盖先于配置校验，可以直接覆盖模板中空的官方地址和 pilot callsign。
+Windows 启动器使用当前环境的 `python`，也可通过环境变量
+`ROBOTX_GROUND_PYTHON` 指定能导入 ROS 2 的 Python 绝对路径；不再自动选仓库
+`.venv`。Linux 在 source ROS 2 环境后，可使用同样参数运行
+`python3 OCS/uav_ground_validation.py`。缺少 ROS 2 依赖时程序报错退出，
+在连接官方 Broker 前停止，不回退到内部 MQTT。
+默认持续运行，Ctrl+C 停止；`--duration 90` 表示从进程启动计时 90 秒，并非
+保证已累计 90 秒有效遥测。等 MDF 实际开始更新后，再观察至少一分钟。
+
+### 运行时观察
+
+控制台依次出现 `WAIT_ROBOCOMMAND` / `WAIT_COURSE`、`DECLARING`、
+`DECLARATION_PUBLISHED`、`WAIT_UAV_TELEMETRY` 或 `HEARTBEATING`。
+`HEARTBEAT_PUBLISHED` 包含 report_seq、真实 state/phase、接收年龄和发布计数。
+成功发布是收到 Broker 的 QoS1 PUBACK，不代表 MDF 已验收。
+可选 JSONL 文件记录这些事件；围栏坐标由已有声明函数打印到控制台。
+
+UAV 数据超过 3 秒未更新、收到模拟/身份不匹配数据时，停止发布缓存心跳，
+等待新鲜有效数据。ROS 订阅使用 VOLATILE，不要求发布端提供历史数据；ROS
+执行器故障或接收队列溢出时退出。ROS 订阅创建成功不等于已发现 UAV，必须收到
+有效状态才发心跳。来源提供 `sent_at_unix_ms` 或
+`timestamp_unix_ms` 时还检查来源时间；现有 JSON 没有来源时间戳时，仅能证明
+本机收包新鲜度，不能据此证明 GNSS 采样延迟。现场需确认 GNSS lock 与 MDF 更新。
+roll/pitch 若源 JSON 提供则转发，否则保持官方 protobuf 字段未填；不补零。
+
+官方链路在 RunStart 前重连时，重新收到 Course 后重新声明；已收到 RunStart
+则保留 run_id 和序号，等待重新接收 Course 和新的 UAV 数据后继续遥测。
+发布报错或 3 秒内未收到 PUBACK 时进程退出，避免不确定的声明被自动重复提交。
+此时先核对 RoboCommand 是否已经收到声明，再决定重新启动。
+
+### 对应 Ground Screening 表
+
+本入口用于 MDF 1–4 的正常声明/遥测链路，以及 SYS1 的有效请求。
+验收人员仍需在 MDF 确认飞机 ID、pilot、实际提交围栏和最高高度，以及至少
+一分钟的更新和位置误差要求。SYS2/SYS3 通过下列显式测试参数发送负例，仍需
+官方侧明确拒绝日志；模拟服务没有 MDF 页面或现场审批/hold 功能。
+
+### 同一个入口的三个场景
+
+三个场景均直接订阅真实 ROS topic，先接收并校验当前 RxCourse，再校验同一份
+合法基线配置。`normal` 原样发布，负例仅修改指定的声明字段；Heartbeat 的实际
+坐标、高度、状态和飞行阶段不随测试声明改变。不要把 local.json 改成非法配置。
+
+| 参数 | 声明行为 | 服务端预期 |
+|---|---|---|
+| `--scenario normal` | 当前 Course 内的合法围栏，基线高度如 40 m HAE | 接受；真实 AUTO 后 RunStart |
+| `--scenario outside-course --outside-offset-m 20` | 整个闭合围栏移到 Course 与 Transit 最北边界之外至少 20 m | 越界 refused |
+| `--scenario over-height --test-max-altitude-hae 60` | 保留合法围栏，只把声明最高高度改为 60 m HAE | 超高 refused，基于模拟端默认 50 m HAE 上限 |
+
+专属参数用于错误场景会在联网前报错；北移距离范围为 2–100000 m；测试高度
+须有限、在 `(50,100000]` m HAE 内，且 protobuf 编码后仍大于 50。
+负例要求对外 ID 以 `UAV` 开头，避免官方脚本跳过检查。
+
+每轮先在 A 停止上一份 OCS，再在 B 的官方 `robocommand/RobotX_2026` 目录运行
+`docker compose restart rc-test`，等日志重新出现 `Published RxCourse (retained)`。
+B 的 Docker 服务保持运行，以下三个命令按轮次在 A 的已加载 ROS 的 PowerShell
+执行，不并行运行。`$GroundPython` 指向文档所述 `.venv-ground` 解释器：
+
+```powershell
+# SYS1 正常。持续至少一分钟有效心跳后 Ctrl+C。
+& $GroundPython .\OCS\uav_ground_validation.py `
+  --config .\OCS\config.uav-ground.local.json `
+  --scenario normal --team-id GVSYS1 --log .\logs\sys1-normal.jsonl
+
+# 重置 B 后，SYS2 越界。
+& $GroundPython .\OCS\uav_ground_validation.py `
+  --config .\OCS\config.uav-ground.local.json `
+  --scenario outside-course --team-id GVSYS2 `
+  --outside-offset-m 20 --duration 90 --log .\logs\sys2-outside-course.jsonl
+
+# 再重置 B 后，SYS3 超高。
+& $GroundPython .\OCS\uav_ground_validation.py `
+  --config .\OCS\config.uav-ground.local.json `
+  --scenario over-height --team-id GVSYS3 `
+  --test-max-altitude-hae 60 --duration 90 --log .\logs\sys3-over-height.jsonl
+```
+
+`DECLARATION_PUBLISHED` 写出实际发送的围栏和高度、scenario、expected_result，
+并明确 `transport_ack="MQTT PUBACK only"` 和 `outcome="acceptance_unknown"`。
+退出码 0 仅表示程序通信执行结束或人工中止，不能用作负例通过判定；定时结束时
+仍无心跳或运行异常为 2。
+官方拒绝不回传消息，需在 B 保存带对应 Team 和原因的 `refused` 日志。
+没有 RunStart 也可能源于 MANUAL、无心跳或断线，不能单独证明拒绝。
+
+负例收到匹配 RunStart 会记录 `SCENARIO_FAILED` 并退出；声明之后断线、Course
+变化也会退出，避免重复提交污染结果。正常模式保留既有的重连流程，所有模式均无
+车辆命令输出。端到端延迟、位置误差、现场身份和 MDF 验收仍由实际系统确认。
+
+离线回归：`python -m unittest discover -s OCS -p "test_*.py"`。
+2026-11-07 在仓库 `.venv` 中执行，138 项通过，无失败或跳过。
+
+测试分为两层：`test_ros2_ground_input.py` 用假的 rclpy 模块验证订阅类型、topic、
+QoS、回调数据和资源清理；`test_ground_mqtt_flow.py` 用模拟 ROS 输入和一个真实
+loopback MQTT Broker 验证接收 Course、声明、Heartbeat 和 RunStart 的官方通信。
+这些测试不连接 DDS 或 UAV。仓库当前 `.venv` 没有 rclpy，尚未实测真实 ROS 2
+跨机订阅或现场 RoboCommand/MDF。之前双 MQTT 原型的 65 秒测试结果仅属于旧
+输入路径，不能用作本 ROS 2 入口的验收证据。
+
+## 原有只读 Monitor 测试
+
+以下是历史 MQTT bridge/Monitor 工具的独立测试说明，不属于上述直接 ROS 2
+Ground Validation 链路，也不需要随地面验证一起启动。
+
 This guide tests the read-only UAV status path only. It does not send a
 RoboCommand request, Heartbeat, RunDeclaration, RunStart, flight command, or
 geofence upload. Do not use a competition broker for the simulator.

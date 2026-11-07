@@ -2,6 +2,24 @@
 
 同济 RobotX 2026 通信协议、OCS 网关和联调工具。
 
+## UAV 单机 Ground Validation
+
+仅验证 UAV 地面通信时，使用 `scripts/start_uav_ground_validation.bat`（Windows）
+或 `python OCS/uav_ground_validation.py`。在已加载 ROS 2 的环境中运行，直接订阅
+`/tongji_mrl/tsky/uav_status`（`std_msgs/msg/String` JSON），完成 RoboCommand
+连接、RxCourse 校验、单机 RunDeclaration 和真实 UAV 2 Hz Heartbeat。
+UAV → OCS 使用 ROS 2；OCS → RoboCommand 使用 MQTT/Protobuf。
+该入口不需要内部 MQTT Broker、MQTT bridge 或 USV 任务状态机。
+配置见 `OCS/config.uav-ground.example.json`，完整步骤见
+[`docs/UAV_STATUS_TEST_GUIDE.md` 的 Ground Validation 部分](docs/UAV_STATUS_TEST_GUIDE.md#uav-单机-ground-validation完整官方通信流程)。
+本次官方模拟使用对外车辆 ID `UAV1`，ROS 来源 ID 仍为 `UAV1`，topic 不变。
+正常、越界、超高均使用同一入口，以 `--scenario normal`、
+`--scenario outside-course`、`--scenario over-height` 切换。
+负例只改变声明中的围栏或最高高度，真实 ROS 遥测照常转发；是否拒绝以模拟端日志为准。
+Windows 协作者的完整交接手册见
+[配置与测试文档](deliverables/RobotX_UAV_Ground_Test_Windows_20261107.docx)。
+下方车辆 Agent + Gateway 章节描述的是另一条集成路线，不是此地面验证入口。
+
 ## 架构边界
 
 ```text
