@@ -21,12 +21,12 @@
     "uav": {
       "vehicle_id": "T-Sky",
       "internal_label": "T-Sky",
-      "orin_ip": "UAV_ORIN_IP"
+      "orin_ip": "192.168.206.67"
     },
     "usv": {
       "vehicle_id": "T-Wave",
       "internal_label": "T-Wave",
-      "orin_ip": "USV_ORIN_IP"
+      "orin_ip": "192.168.206.66"
     }
   },
   "run_declaration": {
@@ -34,7 +34,7 @@
       "task1": "disruptive",
       "task2": "none",
       "task3": "disruptive",
-      "task4": "disruptive"
+      "task4": "core"
     },
     "uav_geofence": [],
     "note": "Auto candidate uses the inscribed Course-only region; review actual FCU/geofence and takeoff/landing, and set a real uav_pilot_callsign before --publish-declaration. Ground negative tests must be offline.",

@@ -22,11 +22,11 @@ from typing import Iterable, Mapping, Sequence
 try:
     from .course_store import CourseStore
     from .course_config import make_payload, fingerprint, validate_geofence_within_course
-    from .geofence_planner import calculate_geofence_from_course, validate_geofence_altitude
+    from .geofence_planner import calculate_geofence_from_course, calculate_geofence_from_course_union, validate_geofence_altitude
 except ImportError:  # Script/test execution directly from the OCS directory.
     from course_store import CourseStore
     from course_config import make_payload, fingerprint, validate_geofence_within_course
-    from geofence_planner import calculate_geofence_from_course, validate_geofence_altitude
+    from geofence_planner import calculate_geofence_from_course, calculate_geofence_from_course_union, validate_geofence_altitude
 
 try:
     import paho.mqtt.client as mqtt
@@ -926,17 +926,22 @@ class OcsClient:
         has_declared_uav = any(item == "T-Sky" or item.startswith("UAV") for item in ids)
         if len(task_tiers) != 4:
             raise ValueError("task_tiers must contain Task1 through Task4")
-        if uav_geofence_mode not in {"manual", "auto_course"}:
-            raise ValueError("uav_geofence_mode must be manual or auto_course")
+        if uav_geofence_mode not in {"manual", "auto_course", "auto_course_union"}:
+            raise ValueError("uav_geofence_mode must be manual, auto_course, or auto_course_union")
         configured_fence = list(uav_geofence)
-        if uav_geofence_mode == "auto_course":
+        if uav_geofence_mode in {"auto_course", "auto_course_union"}:
             if configured_fence:
-                raise ValueError("auto_course and a manual uav_geofence cannot be combined")
+                raise ValueError("automatic geofence mode and a manual uav_geofence cannot be combined")
             if not has_declared_uav:
-                raise ValueError("auto_course requires a declared UAV (T-Sky or a UAV-prefixed vehicle_id)")
-            configured_fence = calculate_geofence_from_course(
-                course.corners, margin_m=uav_geofence_margin_m,
-            )
+                raise ValueError("automatic geofence mode requires a declared UAV (T-Sky or a UAV-prefixed vehicle_id)")
+            if uav_geofence_mode == "auto_course_union":
+                configured_fence = calculate_geofence_from_course_union(
+                    course.corners, course.uav_transit_area, margin_m=uav_geofence_margin_m,
+                )
+            else:
+                configured_fence = calculate_geofence_from_course(
+                    course.corners, margin_m=uav_geofence_margin_m,
+                )
             print("[Geofence] OCS calculated candidate (lat,lon):", configured_fence)
             print("[Geofence] Operator must verify FCU fence and approved operating area")
         fence = [_lat_lng(lat, lng) for lat, lng in configured_fence]

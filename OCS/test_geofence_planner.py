@@ -3,7 +3,7 @@ import math
 import unittest
 
 from course_config import validate_geofence_within_course
-from geofence_planner import calculate_geofence_from_course, validate_geofence_altitude
+from geofence_planner import calculate_geofence_from_course, calculate_geofence_from_course_union, validate_geofence_altitude
 from ocs_client import OcsClient
 from robotx import rx_course_pb2, rx_requests_pb2
 
@@ -40,6 +40,16 @@ TRANSIT_ONLY = [
 
 
 class GeofenceAutoPlannerTests(unittest.TestCase):
+    def test_union_mode_requires_exact_one_meter_and_safe_geometry_engine(self):
+        with self.assertRaisesRegex(ValueError, "1.0"):
+            calculate_geofence_from_course_union(COURSE, TRANSIT, margin_m=2.0)
+        try:
+            ring = calculate_geofence_from_course_union(COURSE, TRANSIT, margin_m=1.0)
+        except RuntimeError as exc:
+            self.assertIn("Shapely/GEOS", str(exc))
+        else:
+            self.assertEqual(ring[0], ring[-1])
+            validate_geofence_within_course(COURSE, ring, TRANSIT)
     def test_generated_fence_is_closed_and_inside_course(self):
         ring = calculate_geofence_from_course(COURSE, margin_m=2.0)
         self.assertEqual(len(ring), 13)

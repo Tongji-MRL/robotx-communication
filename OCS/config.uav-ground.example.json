@@ -11,6 +11,6 @@
     "uav_geofence_margin_m": 2.0,
     "uav_geofence_max_altitude_hae_m": 40.0,
     "uav_geofence_altitude_limit_hae_m": 50.0,
-    "uav_pilot_callsign": ""
+    "uav_pilot_callsign": "zhankun"
   }
 }

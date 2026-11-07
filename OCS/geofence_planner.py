@@ -135,3 +135,61 @@ def calculate_geofence_from_course(
     # Preserve correctness even if floating point / projection error appears.
     validate_geofence_within_course(ring, vertices)
     return vertices
+
+
+def calculate_geofence_from_course_union(
+    course_corners: Iterable[tuple[float, float]], uav_transit_area: Iterable[tuple[float, float]] = (), *,
+    margin_m: float = 1.0,
+) -> list[tuple[float, float]]:
+    """Return ``Buffer(Union(Course, Transit), -margin_m)`` in ``(lat, lon)``.
+
+    This intentionally requires the approved GEOS/Shapely geometry engine: a
+    hand-written union/buffer implementation could silently lose holes or a
+    disconnected component.  A MultiPolygon or polygon with holes cannot be
+    represented by the current single-ring RunDeclaration schema, so it is
+    rejected rather than reduced to one component.
+    """
+    margin = _finite_number(margin_m, "uav_geofence_margin_m")
+    if margin != 1.0:
+        raise ValueError("auto_course_union requires uav_geofence_margin_m=1.0")
+    _, _, course = validate_course_fields("RxCourse", 1, course_corners)
+    transit_raw = tuple(uav_transit_area)
+    transit = validate_course_fields("uav_transit_area", 1, transit_raw)[2] if transit_raw else None
+    points = list(course[:-1]) + ([] if transit is None else list(transit[:-1]))
+    lat0 = sum(point[0] for point in points) / len(points)
+    lon0 = sum(point[1] for point in points) / len(points)
+    if max(point[1] for point in points) - min(point[1] for point in points) > 1:
+        raise ValueError("auto_course_union does not support antimeridian or >1 degree longitude extent")
+    cos_lat = math.cos(math.radians(lat0))
+    if abs(cos_lat) < 1e-4:
+        raise ValueError("auto_course_union local projection is unsupported close to the poles")
+    lat_factor = EARTH_RADIUS_M * math.pi / 180
+    lon_factor = lat_factor * cos_lat
+
+    def project(ring):
+        return [((lon - lon0) * lon_factor, (lat - lat0) * lat_factor) for lat, lon in ring]
+
+    try:
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+    except ImportError as exc:
+        raise RuntimeError(
+            "auto_course_union requires the approved Shapely/GEOS geometry engine; refusing unsafe fallback"
+        ) from exc
+    source = [Polygon(project(course))]
+    if transit is not None:
+        source.append(Polygon(project(transit)))
+    if any(not polygon.is_valid or polygon.is_empty for polygon in source):
+        raise ValueError("auto_course_union received an invalid Course or transit polygon")
+    result = unary_union(source).buffer(-margin, join_style=2)
+    if result.is_empty:
+        raise ValueError("auto_course_union leaves no area after 1m inset")
+    if result.geom_type != "Polygon":
+        raise ValueError("auto_course_union result is MultiPolygon; RunDeclaration cannot represent all components")
+    if result.interiors:
+        raise ValueError("auto_course_union result has holes; RunDeclaration cannot represent holes safely")
+    ring = [(lat0 + y / lat_factor, lon0 + x / lon_factor) for x, y in result.exterior.coords]
+    if len(ring) < 4:
+        raise ValueError("auto_course_union generated an invalid closed ring")
+    validate_geofence_within_course(course, ring, () if transit is None else transit)
+    return ring

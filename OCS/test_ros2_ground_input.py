@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from uav_ground_validation import Ros2StatusInput, STATUS_TOPIC
+from uav_ground_validation import Ros2StatusInput, STATUS_TOPIC, UAV_GEOFENCE_READBACK_TOPIC
 
 
 class FakeRos:
@@ -145,6 +145,7 @@ class Ros2GroundInputTests(unittest.TestCase):
         self.received = []
         session = types.SimpleNamespace(telemetry_available=False, clock=lambda: self.now)
         session.on_status = lambda raw, **kwargs: self.received.append((raw, kwargs))
+        session.event = lambda *_args, **_kwargs: None
 
         def unavailable():
             session.telemetry_available = False
@@ -162,13 +163,19 @@ class Ros2GroundInputTests(unittest.TestCase):
                 self.assertTrue(session.telemetry_available)
                 self.assertEqual(len(ros.nodes), 1)
                 node = ros.nodes[0]
-                self.assertEqual(len(node.subscriptions), 1)
+                self.assertEqual(len(node.subscriptions), 2)
                 subscription = node.subscriptions[0]
                 self.assertEqual(subscription.topic, "/tongji_mrl/tsky/uav_status")
                 self.assertIs(subscription.message_type, ros.String)
                 self.assertEqual(subscription.qos.depth, 10)
                 self.assertEqual(subscription.qos.reliability, ros.ReliabilityPolicy.RELIABLE)
                 self.assertEqual(subscription.qos.durability, ros.DurabilityPolicy.VOLATILE)
+                readback = node.subscriptions[1]
+                self.assertEqual(readback.topic, UAV_GEOFENCE_READBACK_TOPIC)
+                self.assertIs(readback.message_type, ros.String)
+                self.assertEqual(readback.qos.depth, 10)
+                self.assertEqual(readback.qos.reliability, ros.ReliabilityPolicy.RELIABLE)
+                self.assertEqual(readback.qos.durability, ros.DurabilityPolicy.VOLATILE)
                 self.assertIs(node.context, ros.contexts[0])
                 self.assertIs(ros.executors[0].context, ros.contexts[0])
             finally:

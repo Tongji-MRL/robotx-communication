@@ -26,9 +26,16 @@ except ImportError:
     from uav_status import normalize_uav_status
 
 STATUS_TOPIC = "/tongji_mrl/tsky/uav_status"
+# The UAV team supplied these ROS 2 String topic names and depth only.  Their
+# JSON schema and the FCU readback contract have not yet been supplied, so this
+# entry subscribes for diagnostics only and never publishes a guessed payload.
+UAV_GEOFENCE_APPLY_TOPIC = "/tongji_mrl/tsky/uav_geofence_sub"
+UAV_GEOFENCE_READBACK_TOPIC = "/tongji_mrl/tsky/uav_geofence_pub"
 DEFAULT_CONFIG = Path(__file__).with_name("config.uav-ground.example.json")
 MAX_STATUS_AGE_S = 3.0
 HEARTBEAT_PERIOD_S = 0.5
+HEARTBEAT_ACK_TIMEOUT_S = 5.0
+MAX_PENDING_HEARTBEATS = 4
 SCENARIOS = ("normal", "outside-course", "over-height")
 TEST_SERVER_MAX_ALTITUDE_HAE_M = 50.0
 
@@ -74,8 +81,15 @@ class GroundOcsClient(protocol.OcsClient):
         super().__init__(*args, **kwargs)
         self._events = queue.Queue(maxsize=256)
         self._overflow = False
+        self._heartbeat_pending = {}
+        self._heartbeat_early_pubacks = set()
+        self._heartbeat_publish_reservations = 0
+        self._heartbeat_stats = {"queued": 0, "confirmed": 0, "ack_timeouts": 0,
+                                 "dropped_pending_limit": 0, "publish_errors": 0}
+        self._heartbeat_lock = threading.RLock()
         self.expect_rejection = False
         self.unexpected_run_start = None
+        self.client.on_publish = self._on_publish
 
     def _enqueue(self, event):
         try:
@@ -93,6 +107,28 @@ class GroundOcsClient(protocol.OcsClient):
     def _on_message(self, _client, _userdata, message):
         self._enqueue(("message", SimpleNamespace(
             topic=message.topic, payload=bytes(message.payload), retain=message.retain)))
+
+    def _on_publish(self, _client, _userdata, mid, _reason_code=None, _properties=None):
+        with self._heartbeat_lock:
+            pending = self._heartbeat_pending.pop(mid, None)
+            if pending is None and self._heartbeat_publish_reservations:
+                self._heartbeat_early_pubacks.add(mid)
+            elif pending is not None:
+                self._heartbeat_stats["confirmed"] += 1
+
+    def _expire_heartbeat_pending(self, now=None):
+        now = time.monotonic() if now is None else now
+        with self._heartbeat_lock:
+            for pending in self._heartbeat_pending.values():
+                if not pending["timed_out"] and now - pending["queued_at"] >= HEARTBEAT_ACK_TIMEOUT_S:
+                    pending["timed_out"] = True
+                    self._heartbeat_stats["ack_timeouts"] += 1
+
+    def heartbeat_transport_status(self):
+        self._expire_heartbeat_pending()
+        with self._heartbeat_lock:
+            return {**self._heartbeat_stats, "pending": len(self._heartbeat_pending),
+                    "timed_out_pending": sum(item["timed_out"] for item in self._heartbeat_pending.values())}
 
     def process_events(self):
         if self._overflow:
@@ -130,6 +166,7 @@ class GroundOcsClient(protocol.OcsClient):
             }
 
     def _publish(self, topic, message):
+        """Reliable synchronous path reserved for RunDeclaration."""
         result = self.client.publish(topic, message.SerializeToString(), qos=1, retain=False)
         if result.rc != protocol.mqtt.MQTT_ERR_SUCCESS:
             raise ConnectionError(f"MQTT publish rejected: rc={result.rc}, topic={topic}")
@@ -138,6 +175,46 @@ class GroundOcsClient(protocol.OcsClient):
             # An ambiguous declaration must not be blindly retried as a new flight.
             raise TimeoutError(f"MQTT PUBACK not received within 3s: {topic}")
         return result.mid
+
+    def _publish_heartbeat(self, topic, message):
+        """Queue one QoS1 Heartbeat without making the 2 Hz scheduler wait for PUBACK."""
+        # Existing isolated unit fixtures replace _publish with an in-memory
+        # serializer.  Preserve that explicit test seam; production instances
+        # always use the non-blocking Paho path below.
+        if "_publish" in self.__dict__:
+            return self._publish(topic, message)
+        self._expire_heartbeat_pending()
+        with self._heartbeat_lock:
+            if len(self._heartbeat_pending) >= MAX_PENDING_HEARTBEATS:
+                self._heartbeat_stats["dropped_pending_limit"] += 1
+                return None
+            self._heartbeat_publish_reservations += 1
+            try:
+                result = self.client.publish(topic, message.SerializeToString(), qos=1, retain=False)
+            finally:
+                self._heartbeat_publish_reservations -= 1
+        if result.rc != protocol.mqtt.MQTT_ERR_SUCCESS:
+            with self._heartbeat_lock:
+                self._heartbeat_stats["publish_errors"] += 1
+            raise ConnectionError(f"MQTT heartbeat publish rejected: rc={result.rc}, topic={topic}")
+        with self._heartbeat_lock:
+            if result.mid in self._heartbeat_early_pubacks or result.is_published():
+                self._heartbeat_early_pubacks.discard(result.mid)
+                self._heartbeat_stats["confirmed"] += 1
+            else:
+                self._heartbeat_pending[result.mid] = {"queued_at": time.monotonic(), "timed_out": False}
+                self._heartbeat_stats["queued"] += 1
+        return result.mid
+
+    def _publish_vehicle_body(self, vehicle_id, body_name, body):
+        if body_name != "heartbeat":
+            return super()._publish_vehicle_body(vehicle_id, body_name, body)
+        self._check_vehicle(vehicle_id)
+        seq = self._next_report_seq(vehicle_id)
+        report = protocol.rx_reports_pb2.RxReport(
+            team_id=self.team_id, vehicle_id=vehicle_id, seq=seq, sent_at=protocol.now_timestamp())
+        getattr(report, body_name).CopyFrom(body)
+        return self._publish_heartbeat(f"{protocol.TOPIC_ROOT}/{self.team_id}/{vehicle_id}/report", report)
 
     def connect(self):
         self.client.connect_async(self.broker_host, self.broker_port, keepalive=30)
@@ -204,6 +281,8 @@ class GroundValidationSession:
         self._fatal_error = None
         self._submitted_declaration_seq = None
         self._submitted_course_fingerprint = None
+        self._prepared_geofence = None
+        self._geofence_block_reason = None
         self.heartbeat_count = 0
 
     def event(self, event, **fields):
@@ -314,6 +393,29 @@ class GroundValidationSession:
                 or self.ocs._course_received_epoch != self.ocs._course_connection_epoch):
             self.stage("WAIT_COURSE")
             return
+        if self.ocs.declaration_seq is None and self.geofence_options[0] == "auto_course_union":
+            if self._prepared_geofence is None:
+                try:
+                    self._prepared_geofence = self.prepare_declaration()
+                except (ValueError, RuntimeError) as exc:
+                    # A field session must fail closed: this mode has neither a
+                    # verified UAV upload schema nor a verified FCU readback.
+                    # Do not let an unavailable geometry engine turn into the
+                    # legacy declaration path.
+                    self._geofence_block_reason = f"geofence preparation blocked: {exc}"
+                    self.stage("WAIT_UAV_VERIFICATION")
+                    self.event("UAV_GEOFENCE_BLOCKED", topic=UAV_GEOFENCE_APPLY_TOPIC,
+                               reason=self._geofence_block_reason)
+                    return
+                self.stage("GEOFENCE_PREPARED")
+                self.event("GEOFENCE_PREPARED", course_id=self.ocs.course.course_id,
+                           course_fingerprint=self.ocs.course_fingerprint,
+                           maximum_height_hae_m=self._prepared_geofence.uav_geofence_max_altitude_hae_m,
+                           vertices=len(self._prepared_geofence.uav_geofence))
+            self.stage("WAIT_UAV_VERIFICATION")
+            self.event("UAV_GEOFENCE_BLOCKED", topic=UAV_GEOFENCE_APPLY_TOPIC,
+                       reason="UAV JSON upload and FCU readback protocol are not verified; declaration blocked")
+            return
         if self.ocs.declaration_seq is None:
             self.stage("DECLARING")
             try:
@@ -378,8 +480,9 @@ class Ros2StatusInput:
     def __init__(self, session):
         self.session = session
         self.events = queue.Queue(maxsize=256)
+        self.geofence_events = queue.Queue(maxsize=32)
         self.overflow = False
-        self.context = self.node = self.executor = self.subscription = None
+        self.context = self.node = self.executor = self.subscription = self.geofence_subscription = None
         self.thread = None
         self._closing = False
         self._spin_error = None
@@ -387,6 +490,13 @@ class Ros2StatusInput:
     def _on_status(self, message):
         try:
             self.events.put_nowait((message.data, self.session.clock()))
+        except queue.Full:
+            self.overflow = True
+
+    def _on_geofence_readback(self, message):
+        """Receive untrusted raw FCU/UAV replies without treating them as proof."""
+        try:
+            self.geofence_events.put_nowait((message.data, self.session.clock()))
         except queue.Full:
             self.overflow = True
 
@@ -412,6 +522,18 @@ class Ros2StatusInput:
             except queue.Empty:
                 break
             self.session.on_status(raw, received_monotonic=received)
+        for _ in range(32):
+            try:
+                raw, received = self.geofence_events.get_nowait()
+            except queue.Empty:
+                break
+            # Schema, coordinate order, altitude datum/units, and proof that
+            # this is an FCU readback remain unverified.  Do not parse or use
+            # it to unlock RunDeclaration.
+            self.session.event("UAV_GEOFENCE_READBACK_UNVERIFIED",
+                               topic=UAV_GEOFENCE_READBACK_TOPIC,
+                               received_monotonic=received,
+                               reason="UAV geofence JSON/readback protocol not yet verified")
 
     def connect(self):
         try:
@@ -431,6 +553,8 @@ class Ros2StatusInput:
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                          durability=DurabilityPolicy.VOLATILE)
         self.subscription = self.node.create_subscription(String, STATUS_TOPIC, self._on_status, qos)
+        self.geofence_subscription = self.node.create_subscription(
+            String, UAV_GEOFENCE_READBACK_TOPIC, self._on_geofence_readback, qos)
         self.executor = SingleThreadedExecutor(context=self.context)
         self.executor.add_node(self.node)
         self.thread = threading.Thread(target=self._spin, name="ground-uav-ros2", daemon=True)
@@ -450,7 +574,7 @@ class Ros2StatusInput:
             self.thread.join(timeout=2.0)
         if self.node is not None:
             self.node.destroy_node()
-        self.executor = self.context = self.node = self.subscription = self.thread = None
+        self.executor = self.context = self.node = self.subscription = self.geofence_subscription = self.thread = None
 
 
 def main(argv=None):

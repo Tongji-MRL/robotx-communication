@@ -2,6 +2,7 @@
 import copy
 import json
 import types
+from unittest.mock import Mock
 import unittest
 
 from uav_ground_validation import GroundOcsClient, GroundValidationSession, build_ground_heartbeat
@@ -141,6 +142,40 @@ class GroundValidationTests(unittest.TestCase):
         self.assertEqual([report.seq for report in self.reports()], [1, 2, 3])
         self.assertEqual(len(self.declarations()), 1)
         self.assertEqual(self.session.heartbeat_count, 3)
+
+    def test_union_geofence_without_verified_uav_protocol_never_declares(self):
+        config = ground_config()
+        config["run_declaration"].update(
+            uav_geofence_mode="auto_course_union", uav_geofence_margin_m=1.0)
+        self.session = GroundValidationSession(
+            config, ocs=self.client, clock=lambda: self.now,
+            wall_clock=lambda: self.wall, emit=lambda *args, **kwargs: self.events.append((args, kwargs)),
+        )
+        self.session.telemetry_available = True
+        self.receive_course()
+        self.assertTrue(self.session.on_status(uav_status()))
+        self.session.tick()
+        self.assertEqual(self.declarations(), [])
+        self.assertEqual(self.session._stage, "WAIT_UAV_VERIFICATION")
+        self.assertTrue(any(args[0]["event"] == "UAV_GEOFENCE_BLOCKED"
+                            for args, _ in self.events))
+
+    def test_heartbeat_publish_is_nonblocking_and_run_declaration_waits_for_puback(self):
+        client = GroundOcsClient("127.0.0.1", 1883, team_id="TONG")
+        result = Mock(rc=0, mid=7)
+        result.is_published.return_value = False
+        result.wait_for_publish = Mock()
+        client.client.publish = Mock(return_value=result)
+        client._declared_vehicle_ids = {"UAV1"}
+        heartbeat = build_ground_heartbeat(
+            normalize_uav_status(uav_status(), source_vehicle_id="UAV1"),
+            registration="TEST-REGISTRATION",
+        )
+        self.assertEqual(client._publish_vehicle_body("UAV1", "heartbeat", heartbeat), 7)
+        result.wait_for_publish.assert_not_called()
+        self.assertEqual(client.heartbeat_transport_status()["pending"], 1)
+        client._on_publish(None, None, 7)
+        self.assertEqual(client.heartbeat_transport_status()["confirmed"], 1)
 
     def test_legacy_external_id_maps_independent_ros_source_consistently(self):
         config = ground_config()
