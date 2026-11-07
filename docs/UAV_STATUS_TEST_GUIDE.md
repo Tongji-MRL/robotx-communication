@@ -2,6 +2,13 @@
 
 ## UAV 单机 Ground Validation：完整官方通信流程
 
+**现场直连请使用最新 [TONG 官方现场操作手册](../deliverables/RobotX_TONG_Ground_Validation_Official_20261107.docx)。**
+本次 Ground/Flight Validation 网络为 `192.168.69.0/24`，OCS 使用 DHCP，
+broker 是工作人员分配的 `192.168.69.2–6` 中一个实例，正式队伍为 `TONG`。
+无 UAPL ID 的 Ground 阶段，pilot callsign 只填 first name；registration 填
+`TONG-<去掉开头AA的CAAS贴纸号码>`，保留前导零。下文 Docker 重启和 GVSYS
+队名仅用于本地模拟；现场轮次切换由官方确认，SYS 判据使用实际 SV 区域和高度上限。
+
 此部分使用新增的 `OCS/uav_ground_validation.py`，主动向指定 RoboCommand 发布
 声明和真实遥测。默认 `--scenario normal`；越界和超高也使用同一个入口。
 后续章节保留原来的只读 Monitor 测试；两种入口用途不同。

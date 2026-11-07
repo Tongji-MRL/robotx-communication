@@ -15,9 +15,13 @@ UAV → OCS 使用 ROS 2；OCS → RoboCommand 使用 MQTT/Protobuf。
 本次官方模拟使用对外车辆 ID `UAV1`，ROS 来源 ID 仍为 `UAV1`，topic 不变。
 正常、越界、超高均使用同一入口，以 `--scenario normal`、
 `--scenario outside-course`、`--scenario over-height` 切换。
-负例只改变声明中的围栏或最高高度，真实 ROS 遥测照常转发；是否拒绝以模拟端日志为准。
-Windows 协作者的完整交接手册见
-[配置与测试文档](deliverables/RobotX_UAV_Ground_Test_Windows_20261107.docx)。
+负例只改变声明中的围栏或最高高度，真实 ROS 遥测照常转发；模拟测试看服务端拒绝日志，
+现场测试由官方或 MDF 确认 denied/held 及其边界或高度原因。
+直接接入比赛官方服务时，使用最新
+[TONG 现场 Ground Validation 操作手册](deliverables/RobotX_TONG_Ground_Validation_Official_20261107.docx)，
+包含 192.168.69.0/24 DHCP、正式身份格式、逐步命令及 MDF/SYS 验收判据。
+本地 Docker 模拟配置另见
+[模拟测试交接手册](deliverables/RobotX_UAV_Ground_Test_Windows_20261107.docx)。
 下方车辆 Agent + Gateway 章节描述的是另一条集成路线，不是此地面验证入口。
 
 ## 架构边界
