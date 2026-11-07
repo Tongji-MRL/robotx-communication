@@ -1,6 +1,9 @@
 import unittest
 import json
 
+from robotx import rx_common_pb2
+
+from uav_ground_validation import build_ground_heartbeat
 from uav_status import normalize_uav_status, heartbeat_envelope
 from vehicle_link import UAV_STATUS_TOPIC, VehicleLink
 
@@ -17,6 +20,39 @@ class UavStatusTests(unittest.TestCase):
         result = normalize_uav_status(valid(), source_vehicle_id="UAV1", received_unix_ms=100)
         self.assertEqual((result["vehicle_id"], result["state"], result["raw"]["vehicle_id"]), ("T-Sky", "AUTO", "UAV1"))
         self.assertIsNone(heartbeat_envelope(result, run_id=42))
+
+    def test_orin_enum_values_normalize_and_build_heartbeat(self):
+        expected = {
+            "STATE_AUTO": ("AUTO", "FLIGHT_PHASE_AIRBORNE", "airborne"),
+            "STATE_MANUAL": ("MANUAL", "FLIGHT_PHASE_GROUNDED", "grounded"),
+            "STATE_KILLED": ("KILLED", "FLIGHT_PHASE_GROUNDED", "grounded"),
+        }
+        for raw_state, (state, raw_phase, phase) in expected.items():
+            with self.subTest(raw_state=raw_state):
+                status = valid()
+                status.update(vehicle_type="TYPE_UAV", state=raw_state, flight_phase=raw_phase)
+                result = normalize_uav_status(status, source_vehicle_id="UAV1", received_unix_ms=100)
+                self.assertEqual(
+                    (result["vehicle_type"], result["state"], result["flight_phase"]),
+                    ("uav", state, phase),
+                )
+                self.assertEqual(
+                    (result["raw"]["vehicle_type"], result["raw"]["state"], result["raw"]["flight_phase"]),
+                    ("TYPE_UAV", raw_state, raw_phase),
+                )
+                heartbeat = build_ground_heartbeat(result)
+                self.assertEqual(heartbeat.state, getattr(__import__("common_pb2"), raw_state))
+                self.assertEqual(heartbeat.flight_phase, getattr(rx_common_pb2, raw_phase))
+
+    def test_rejects_unknown_enum_values(self):
+        for field, value in (("vehicle_type", "TYPE_UNKNOWN"), ("state", "UNKNOWN"),
+                             ("state", "STATE_UNKNOWN"), ("flight_phase", "UNKNOWN"),
+                             ("flight_phase", "FLIGHT_PHASE_UNKNOWN")):
+            with self.subTest(field=field):
+                status = valid()
+                status[field] = value
+                with self.assertRaises(ValueError):
+                    normalize_uav_status(status, source_vehicle_id="UAV1")
 
     def test_rejects_mapping_and_numeric_errors(self):
         with self.assertRaisesRegex(ValueError, "mapping"):

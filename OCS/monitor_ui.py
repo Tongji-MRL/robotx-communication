@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import threading
 import time
 from collections import deque
@@ -28,10 +29,12 @@ try:
     from .vehicle_link import HEARTBEAT_TOPICS, UAV_STATUS_TOPIC, heartbeat_envelope
     from .vehicle_protocol import command_payload, encode, make_message, topic
     from .uav_status import normalize_uav_status
+    from .geofence_watch import evaluate_uav_fence
 except ImportError:  # script execution from the OCS directory
     from vehicle_link import HEARTBEAT_TOPICS, UAV_STATUS_TOPIC, heartbeat_envelope
     from vehicle_protocol import command_payload, encode, make_message, topic
     from uav_status import normalize_uav_status
+    from geofence_watch import evaluate_uav_fence
 
 
 ROOT = Path(__file__).resolve().parent
@@ -74,6 +77,9 @@ class MonitorState:
         }
         self.vehicles = {vehicle_id: _empty_vehicle(vehicle_id) for vehicle_id in VEHICLES}
         self.course: dict[str, Any] | None = None
+        self.declared_geofence: dict[str, Any] | None = None
+        self.last_uav_fence_alarm: dict[str, Any] | None = None
+        self._last_uav_fence_level: str | None = None
         self.uav_status: dict[str, Any] | None = None
         self.uav_status_received_monotonic: float | None = None
         self.mission_status: dict[str, Any] | None = None
@@ -140,12 +146,54 @@ class MonitorState:
                 {"topic": mqtt_topic, "message": deepcopy(dict(envelope))},
             )
 
-    def note_uav_status(self, raw: str | bytes, *, source_vehicle_id: str) -> None:
+    def note_uav_status(self, raw: str | bytes, *, source_vehicle_id: str,
+                        transport: str = "mqtt") -> None:
         value = normalize_uav_status(raw, source_vehicle_id=source_vehicle_id)
         with self.lock:
             self.uav_status = value
             self.uav_status_received_monotonic = time.monotonic()
-            self._append_message("in", "UAV status", {"topic": UAV_STATUS_MQTT_TOPIC, "payload": value})
+            source_topic = "/tongji_mrl/tsky/uav_status" if transport == "ros2" else UAV_STATUS_MQTT_TOPIC
+            self._append_message("ros2" if transport == "ros2" else "in", "UAV status",
+                                 {"topic": source_topic, "payload": value})
+            self._update_fence_alert()
+
+    def note_rbc_course(self, data: Mapping[str, Any]) -> None:
+        """Record a passively observed Course; it never validates a declaration."""
+        with self.lock:
+            if self.course is not None and self.course != dict(data) and self.declared_geofence is not None:
+                self.declared_geofence = None
+                self._last_uav_fence_level = None
+                self._append_message("geofence", "RBC Course changed; declaration invalidated", {})
+            self.course = deepcopy(dict(data))
+            self._append_message("rbc", "RBC Course observed", {"course_id": data.get("course_id")})
+
+    def note_rbc_declaration(self, *, team_id: str, seq: int,
+                             geofence: list[dict[str, float]], ceiling: float) -> None:
+        """Store a local MQTT observation, explicitly not an acceptance receipt."""
+        with self.lock:
+            self.declared_geofence = {
+                "source": "RBC_MQTT_OBSERVED_REQUEST_NOT_ACCEPTANCE", "team_id": team_id, "seq": seq,
+                "observed_at_unix_ms": int(time.time() * 1000), "uav_geofence": deepcopy(geofence),
+                "uav_geofence_max_altitude_hae_m": ceiling,
+            }
+            self._append_message("rbc", "T-Sky RunDeclaration observed (not acceptance)", {
+                "team_id": team_id, "seq": seq, "ceiling_hae_m": ceiling,
+            })
+            self._update_fence_alert()
+
+    def _update_fence_alert(self) -> None:
+        result = evaluate_uav_fence(self.uav_status, 0 if self.uav_status is not None else None,
+                                    self.declared_geofence, stale_after_s=self.stale_after_s)
+        if result["level"] == self._last_uav_fence_level:
+            return
+        self._last_uav_fence_level = result["level"]
+        if result["level"] in {"ALARM", "CAUTION", "INSIDE"}:
+            self._append_message("geofence", f"UAV fence {result['level']}", {
+                "message": result["message"], "horizontal_clearance_m": result["horizontal_clearance_m"],
+                "height_clearance_m": result["height_clearance_m"],
+            })
+        if result["level"] == "ALARM":
+            self.last_uav_fence_alarm = {"message": result["message"], "timestamp_unix_ms": int(time.time() * 1000)}
 
     def ros2_event(self, *, available: bool, connected: bool, event: str) -> None:
         with self.lock:
@@ -253,6 +301,8 @@ class MonitorState:
             )
             mission_online = mission_age is not None and mission_age <= self.stale_after_s
             uav_age = None if self.uav_status_received_monotonic is None else round(max(0.0, now_monotonic - self.uav_status_received_monotonic), 2)
+            fence_watch = evaluate_uav_fence(self.uav_status, uav_age, self.declared_geofence,
+                                              stale_after_s=self.stale_after_s)
             return {
                 "now_unix_ms": now_ms,
                 "uptime_s": round(time.time() - self.started_at, 1),
@@ -262,6 +312,8 @@ class MonitorState:
                 "uav_status": deepcopy(self.uav_status),
                 "uav_status_age_s": uav_age,
                 "uav_status_online": uav_age is not None and uav_age <= self.stale_after_s,
+                "uav_fence_watch": fence_watch,
+                "last_uav_fence_alarm": deepcopy(self.last_uav_fence_alarm),
                 "mission": deepcopy(self.mission_status),
                 "mission_status": {"received": self.mission_status_received_unix_ms is not None, "last_received_unix_ms": self.mission_status_received_unix_ms, "age_s": mission_age, "online": mission_online, "status": "实时" if mission_online else ("超时" if mission_age is not None else "未收到")},
                 "fsm_task_report": deepcopy(self.fsm_task_report),
@@ -379,11 +431,94 @@ class MqttMonitor:
             self.state.note_error(f"忽略非法消息 {message.topic}: {exc}")
 
 
+class RbcGeofenceObserver:
+    """Read-only observer for a local RBC Course and RunDeclaration topic."""
+
+    def __init__(self, state: MonitorState, *, host: str, port: int, team_id: str) -> None:
+        self.state, self.host, self.port, self.team_id = state, host, port, team_id
+        self.client = None
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        if mqtt is not None:
+            self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            self.client.on_connect = self._on_connect
+            self.client.on_message = self._on_message
+
+    def start(self) -> None:
+        if self.client is None:
+            self.state.note_error("RBC geofence observer unavailable: paho-mqtt is missing")
+            return
+        self._thread = threading.Thread(target=self._connect_loop, name="ocs-ui-rbc-readonly", daemon=True)
+        self._thread.start()
+
+    def _connect_loop(self) -> None:
+        assert self.client is not None
+        while not self._stop.is_set():
+            if not self.client.is_connected():
+                try:
+                    self.client.connect(self.host, self.port, keepalive=60)
+                    self.client.loop_start()
+                except Exception as exc:
+                    self.state.note_error(f"RBC read-only observer waiting for connection: {exc}")
+                    self._stop.wait(3.0)
+                    continue
+            self._stop.wait(1.0)
+
+    def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
+        if reason_code != 0:
+            self.state.note_error(f"RBC read-only observer connection failed: {reason_code}")
+            return
+        client.subscribe("robocommand/robotx/course", qos=1)
+        client.subscribe(f"robocommand/robotx/{self.team_id}/request", qos=1)
+
+    def _on_message(self, _client, _userdata, message) -> None:
+        try:
+            gen_path = ROOT.parent / "RobotX_2026" / "gen" / "python"
+            if str(gen_path) not in sys.path:
+                sys.path.insert(0, str(gen_path))
+            if message.topic == "robocommand/robotx/course":
+                from robotx import rx_course_pb2
+                course = rx_course_pb2.RxCourse()
+                course.ParseFromString(message.payload)
+                self.state.note_rbc_course({
+                    "course_id": course.course_id,
+                    "corners": [{"latitude": point.latitude, "longitude": point.longitude} for point in course.corners],
+                    "uav_transit_area": [{"latitude": point.latitude, "longitude": point.longitude} for point in course.uav_transit_area],
+                })
+                return
+            from robotx import rx_requests_pb2
+            request = rx_requests_pb2.RxRequest()
+            request.ParseFromString(message.payload)
+            if request.team_id != self.team_id or request.WhichOneof("body") != "run_declaration":
+                return
+            declaration = request.run_declaration
+            if "T-Sky" not in declaration.vehicle_ids:
+                return
+            self.state.note_rbc_declaration(
+                team_id=request.team_id, seq=request.seq,
+                geofence=[{"latitude": point.latitude, "longitude": point.longitude}
+                           for point in declaration.uav_geofence],
+                ceiling=declaration.uav_geofence_max_altitude_hae_m,
+            )
+        except Exception as exc:
+            self.state.note_error(f"RBC read-only geofence message rejected: {exc}")
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self.client is not None:
+            self.client.loop_stop()
+            if self.client.is_connected():
+                self.client.disconnect()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+
 class Ros2Monitor:
     """Optional, non-blocking ROS 2 observer for the formal FSM outputs."""
 
-    def __init__(self, state: MonitorState) -> None:
+    def __init__(self, state: MonitorState, uav_source_vehicle_id: str | None = None) -> None:
         self.state = state
+        self.uav_source_vehicle_id = uav_source_vehicle_id
         self._rclpy = None
         self._node = None
         self._thread: threading.Thread | None = None
@@ -398,12 +533,23 @@ class Ros2Monitor:
             return
 
         state = self.state
+        source_vehicle_id = self.uav_source_vehicle_id
         class MonitorNode(Node):
             def __init__(node_self) -> None:
                 super().__init__("robotx_ocs_monitor")
                 node_self.create_subscription(String, MISSION_STATUS_TOPIC, lambda msg: state.note_fsm_status(msg.data), 10)
                 node_self.create_subscription(String, MISSION_REPORT_TOPIC, lambda msg: state.note_fsm_task_report(msg.data), 10)
                 node_self.create_subscription(String, MISSION_FAULT_TOPIC, lambda msg: state.note_fsm_fault(msg.data), 10)
+                if source_vehicle_id:
+                    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+                    uav_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
+                                         durability=DurabilityPolicy.VOLATILE)
+                    node_self.create_subscription(
+                        String, "/tongji_mrl/tsky/uav_status",
+                        lambda msg: state.note_uav_status(msg.data, source_vehicle_id=source_vehicle_id,
+                                                          transport="ros2"),
+                        uav_qos,
+                    )
         try:
             rclpy.init(args=None)
             self._rclpy, self._node = rclpy, MonitorNode()
@@ -496,14 +642,22 @@ def main() -> int:
     parser.add_argument("--username")
     parser.add_argument("--password")
     parser.add_argument("--stale-after", type=float, default=3.0)
-    parser.add_argument("--uav-source-vehicle-id", help="required source vehicle_id for UAV status MQTT subscription")
+    parser.add_argument("--uav-source-vehicle-id", help="UAV JSON source vehicle_id for direct ROS2 and MQTT observation")
+    parser.add_argument("--rbc-watch-broker", help="local loopback RBC broker for read-only Course/RunDeclaration observation")
+    parser.add_argument("--rbc-watch-port", type=int, default=1883)
+    parser.add_argument("--rbc-team-id", default="TONG")
     parser.add_argument("--enable-lab-commands", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.rbc_watch_broker and args.rbc_watch_broker not in {"localhost", "127.0.0.1", "::1"}:
+        parser.error("--rbc-watch-broker must be a local loopback address")
 
     state = MonitorState(stale_after_s=args.stale_after)
     monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password,
                           args.enable_lab_commands, args.uav_source_vehicle_id)
-    ros2_monitor = Ros2Monitor(state)
+    ros2_monitor = Ros2Monitor(state, args.uav_source_vehicle_id)
+    rbc_observer = (RbcGeofenceObserver(state, host=args.rbc_watch_broker,
+                                         port=args.rbc_watch_port, team_id=args.rbc_team_id)
+                    if args.rbc_watch_broker else None)
     handler = type("BoundUiHandler", (UiHandler,), {"state": state, "monitor": monitor})
     server = ThreadingHTTPServer((args.web_host, args.web_port), handler)
     print(f"OCS UI: http://{args.web_host}:{args.web_port}")
@@ -512,6 +666,8 @@ def main() -> int:
     # Start the page first. MQTT may be started later, and the UI will retry.
     monitor.start()
     ros2_monitor.start()
+    if rbc_observer is not None:
+        rbc_observer.start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -520,6 +676,8 @@ def main() -> int:
         server.server_close()
         monitor.stop()
         ros2_monitor.stop()
+        if rbc_observer is not None:
+            rbc_observer.stop()
     return 0
 
 

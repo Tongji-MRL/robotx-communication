@@ -12,6 +12,20 @@ import time
 from typing import Any, Mapping
 
 
+# The ORIN producer serializes protobuf enum names, while older producers use
+# the short values below.  Normalize at this boundary only; ``raw`` retains
+# the message exactly as received for diagnostics.
+_VEHICLE_TYPES = {"uav": "uav", "TYPE_UAV": "uav"}
+_STATES = {
+    "AUTO": "AUTO", "MANUAL": "MANUAL", "KILLED": "KILLED",
+    "STATE_AUTO": "AUTO", "STATE_MANUAL": "MANUAL", "STATE_KILLED": "KILLED",
+}
+_FLIGHT_PHASES = {
+    "GROUNDED": "grounded", "AIRBORNE": "airborne",
+    "FLIGHT_PHASE_GROUNDED": "grounded", "FLIGHT_PHASE_AIRBORNE": "airborne",
+}
+
+
 def _number(value: Any, label: str, low: float, high: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError(f"{label} must be a finite number")
@@ -42,13 +56,14 @@ def normalize_uav_status(raw: str | bytes | Mapping[str, Any], *, source_vehicle
         raise ValueError("UAV source_vehicle_id mapping must be configured")
     if value.get("vehicle_id") != source_vehicle_id:
         raise ValueError("UAV status vehicle_id does not match configured source mapping")
-    if value.get("vehicle_type") != "uav":
-        raise ValueError("UAV status vehicle_type must be uav")
-    state = value.get("state")
-    phase = value.get("flight_phase")
-    if state not in {"AUTO", "MANUAL", "KILLED"}:
+    vehicle_type = _VEHICLE_TYPES.get(value.get("vehicle_type"))
+    if vehicle_type is None:
+        raise ValueError("UAV status vehicle_type must be uav or TYPE_UAV")
+    state = _STATES.get(value.get("state"))
+    phase = _FLIGHT_PHASES.get(value.get("flight_phase"))
+    if state is None:
         raise ValueError("UAV state must be AUTO, MANUAL, or KILLED")
-    if phase not in {"GROUNDED", "AIRBORNE"}:
+    if phase is None:
         raise ValueError("UAV flight_phase must be GROUNDED or AIRBORNE")
     position = value.get("position")
     if not isinstance(position, Mapping):
@@ -64,8 +79,9 @@ def normalize_uav_status(raw: str | bytes | Mapping[str, Any], *, source_vehicle
     now = int(time.time() * 1000) if received_unix_ms is None else received_unix_ms
     normalized = {
         "vehicle_id": vehicle_id, "source_vehicle_id": source_vehicle_id,
-        "source": "ros2:/tongji_mrl/tsky/uav_status", "state": state,
-        "flight_phase": phase.lower(), "position": {"latitude_deg": latitude, "longitude_deg": longitude, "altitude_hae_m": altitude},
+        "source": "ros2:/tongji_mrl/tsky/uav_status", "vehicle_type": vehicle_type,
+        "state": state, "flight_phase": phase,
+        "position": {"latitude_deg": latitude, "longitude_deg": longitude, "altitude_hae_m": altitude},
         "speed_mps": speed, "heading_deg": heading, "battery_status": dict(battery or {}),
         "received_unix_ms": now, "raw": dict(value), "official_heartbeat": None,
     }
