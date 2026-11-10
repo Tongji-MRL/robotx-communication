@@ -1,16 +1,30 @@
 {
-  "team_id": "TONG",
-  "robocommand": {"host": "", "port": 1883},
-  "vehicles": {
-    "uav": {"vehicle_id": "UAV1", "source_vehicle_id": "UAV1", "uav_registration": ""}
-  },
-  "run_declaration": {
-    "task_tiers": {"task1": "none", "task2": "none", "task3": "none", "task4": "none"},
-    "uav_geofence_mode": "auto_course",
-    "uav_geofence": [],
-    "uav_geofence_margin_m": 2.0,
-    "uav_geofence_max_altitude_hae_m": 40.0,
-    "uav_geofence_altitude_limit_hae_m": 50.0,
-    "uav_pilot_callsign": "zhankun"
-  }
+    "team_id":  "TONG",
+    "robocommand":  {
+                        "host":  "192.168.69.4",
+                        "port":  1883
+                    },
+    "vehicles":  {
+                     "uav":  {
+                                 "vehicle_id":  "UAV1",
+                                 "source_vehicle_id":  "UAV1",
+                                 "uav_registration":  "TONG-53580"
+                             }
+                 },
+    "run_declaration":  {
+                            "task_tiers":  {
+                                               "task1":  "none",
+                                               "task2":  "none",
+                                               "task3":  "none",
+                                               "task4":  "none"
+                                           },
+                            "uav_geofence_mode":  "auto_course",
+                            "uav_geofence":  [
+
+                                             ],
+                            "uav_geofence_margin_m":  1.0,
+                            "uav_geofence_max_altitude_hae_m":  40.0,
+                            "uav_geofence_altitude_limit_hae_m":  50.0,
+                            "uav_pilot_callsign":  "zhankun"
+                        }
 }

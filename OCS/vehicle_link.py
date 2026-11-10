@@ -108,6 +108,8 @@ class VehicleLink:
         active_run_id: Callable[[], int | None] | None = None,
         on_uav_status: Callable[[dict[str, Any]], None] | None = None,
         uav_source_vehicle_id: str | None = None,
+        uav_vehicle_id: str = "T-Sky",
+        uav_registration: str | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
@@ -121,6 +123,8 @@ class VehicleLink:
         self.active_run_id = active_run_id or (lambda: None)
         self.on_uav_status = on_uav_status
         self.uav_source_vehicle_id = uav_source_vehicle_id
+        self.uav_vehicle_id = uav_vehicle_id
+        self.uav_registration = uav_registration
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         if username:
             self.client.username_pw_set(username, password)
@@ -153,6 +157,8 @@ class VehicleLink:
                     raise ValueError("UAV status received without configured source vehicle_id mapping")
                 self.on_uav_status(normalize_uav_status(
                     message.payload, source_vehicle_id=self.uav_source_vehicle_id,
+                    vehicle_id=getattr(self, "uav_vehicle_id", "T-Sky"),
+                    uav_registration=getattr(self, "uav_registration", None),
                 ))
                 print("[RxVehicle] UAV status accepted for read-only cache")
                 return

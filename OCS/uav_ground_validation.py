@@ -29,8 +29,8 @@ STATUS_TOPIC = "/tongji_mrl/tsky/uav_status"
 # The UAV team supplied these ROS 2 String topic names and depth only.  Their
 # JSON schema and the FCU readback contract have not yet been supplied, so this
 # entry subscribes for diagnostics only and never publishes a guessed payload.
-UAV_GEOFENCE_APPLY_TOPIC = "/tongji_mrl/tsky/uav_geofence_sub"
-UAV_GEOFENCE_READBACK_TOPIC = "/tongji_mrl/tsky/uav_geofence_pub"
+UAV_GEOFENCE_APPLY_TOPIC = "/tongji_mrl/tsky/uav_geofense_sub"
+UAV_GEOFENCE_READBACK_TOPIC = "/tongji_mrl/tsky/uav_geofense_pub"
 DEFAULT_CONFIG = Path(__file__).with_name("config.uav-ground.example.json")
 MAX_STATUS_AGE_S = 3.0
 HEARTBEAT_PERIOD_S = 0.5
@@ -393,7 +393,7 @@ class GroundValidationSession:
                 or self.ocs._course_received_epoch != self.ocs._course_connection_epoch):
             self.stage("WAIT_COURSE")
             return
-        if self.ocs.declaration_seq is None and self.geofence_options[0] == "auto_course_union":
+        if self.ocs.declaration_seq is None and self.geofence_options[0] in {"auto_course", "auto_course_union"}:
             if self._prepared_geofence is None:
                 try:
                     self._prepared_geofence = self.prepare_declaration()
@@ -460,7 +460,7 @@ class GroundValidationSession:
             self.ocs._publish_vehicle_body(self.vehicle_id, "heartbeat", heartbeat)
         except (OSError, RuntimeError) as exc:
             self._publish_error = str(exc)
-            raise
+            raise RuntimeError(f"heartbeat publication failed: {exc}") from exc
         self.heartbeat_count += 1
         self.event("HEARTBEAT_PUBLISHED", count=self.heartbeat_count,
                    report_seq=self.ocs._report_seq[self.vehicle_id], run_id=self.ocs.run_id,

@@ -80,6 +80,8 @@ class MonitorState:
         self.declared_geofence: dict[str, Any] | None = None
         self.last_uav_fence_alarm: dict[str, Any] | None = None
         self._last_uav_fence_level: str | None = None
+        self._uav_fence_alarm_latch: dict[str, Any] | None = None
+        self._uav_fence_recovery_started_monotonic: float | None = None
         self.uav_status: dict[str, Any] | None = None
         self.uav_status_received_monotonic: float | None = None
         self.mission_status: dict[str, Any] | None = None
@@ -184,16 +186,49 @@ class MonitorState:
     def _update_fence_alert(self) -> None:
         result = evaluate_uav_fence(self.uav_status, 0 if self.uav_status is not None else None,
                                     self.declared_geofence, stale_after_s=self.stale_after_s)
-        if result["level"] == self._last_uav_fence_level:
+        level = result["level"]
+        if level == "ALARM":
+            # Retain the latest measured breach, not merely the first alarm.
+            self._uav_fence_alarm_latch = deepcopy(result)
+            self._uav_fence_alarm_latch["timestamp_unix_ms"] = int(time.time() * 1000)
+            self._uav_fence_recovery_started_monotonic = None
+            self.last_uav_fence_alarm = deepcopy(self._uav_fence_alarm_latch)
+        elif self._uav_fence_alarm_latch is not None:
+            if level == "INSIDE":
+                now = time.monotonic()
+                if self._uav_fence_recovery_started_monotonic is None:
+                    self._uav_fence_recovery_started_monotonic = now
+                elif now - self._uav_fence_recovery_started_monotonic >= 2.0:
+                    self._uav_fence_alarm_latch = None
+                    self._uav_fence_recovery_started_monotonic = None
+                    self._append_message("geofence", "UAV fence alarm cleared after 2s INSIDE", {})
+            else:
+                # CAUTION, UNKNOWN and STALE do not prove recovery.
+                self._uav_fence_recovery_started_monotonic = None
+        if level == self._last_uav_fence_level:
             return
-        self._last_uav_fence_level = result["level"]
-        if result["level"] in {"ALARM", "CAUTION", "INSIDE"}:
+        self._last_uav_fence_level = level
+        if level in {"ALARM", "CAUTION", "INSIDE"}:
             self._append_message("geofence", f"UAV fence {result['level']}", {
                 "message": result["message"], "horizontal_clearance_m": result["horizontal_clearance_m"],
                 "height_clearance_m": result["height_clearance_m"],
             })
-        if result["level"] == "ALARM":
-            self.last_uav_fence_alarm = {"message": result["message"], "timestamp_unix_ms": int(time.time() * 1000)}
+
+    def _fence_alert_snapshot(self, current: Mapping[str, Any]) -> dict[str, Any]:
+        """Presentation state: a latched alert never claims stale data is safe."""
+        latch = self._uav_fence_alarm_latch
+        if latch is None:
+            return {"active": False, "state": current["level"], "current": deepcopy(dict(current)),
+                    "last_confirmed_alarm": deepcopy(self.last_uav_fence_alarm)}
+        if current["level"] == "ALARM":
+            state, message = "ALARM", current["message"]
+        elif current["level"] == "STALE":
+            state, message = "STALE_AFTER_ALARM", "Last confirmed geofence breach; current UAV telemetry is stale."
+        else:
+            state, message = "RECOVERY_PENDING", "Last confirmed geofence breach; awaiting 2 seconds of valid INSIDE telemetry."
+        return {"active": True, "state": state, "message": message, "current": deepcopy(dict(current)),
+                "last_confirmed_alarm": deepcopy(latch),
+                "recovery_started_monotonic": self._uav_fence_recovery_started_monotonic}
 
     def ros2_event(self, *, available: bool, connected: bool, event: str) -> None:
         with self.lock:
@@ -303,6 +338,7 @@ class MonitorState:
             uav_age = None if self.uav_status_received_monotonic is None else round(max(0.0, now_monotonic - self.uav_status_received_monotonic), 2)
             fence_watch = evaluate_uav_fence(self.uav_status, uav_age, self.declared_geofence,
                                               stale_after_s=self.stale_after_s)
+            fence_alert = self._fence_alert_snapshot(fence_watch)
             return {
                 "now_unix_ms": now_ms,
                 "uptime_s": round(time.time() - self.started_at, 1),
@@ -313,6 +349,7 @@ class MonitorState:
                 "uav_status_age_s": uav_age,
                 "uav_status_online": uav_age is not None and uav_age <= self.stale_after_s,
                 "uav_fence_watch": fence_watch,
+                "uav_fence_alert": fence_alert,
                 "last_uav_fence_alarm": deepcopy(self.last_uav_fence_alarm),
                 "mission": deepcopy(self.mission_status),
                 "mission_status": {"received": self.mission_status_received_unix_ms is not None, "last_received_unix_ms": self.mission_status_received_unix_ms, "age_s": mission_age, "online": mission_online, "status": "实时" if mission_online else ("超时" if mission_age is not None else "未收到")},

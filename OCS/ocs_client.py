@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Small official RoboCommand-side OCS client.
+"""官方 RoboCommand 侧 OCS 客户端。
 
-This module deliberately stops at the OCS boundary.  It connects the OCS to
-the RoboCommand MQTT broker, decodes official downlink messages, and exposes
-methods for publishing team declarations and vehicle reports.  The Orin/ROS 2
-bridge can call these methods later; the demo mode below only sends clearly
-marked synthetic data for broker/protobuf testing.
+它是 OCS 与官方 MQTT/Protobuf 的协议边界：接收 Course、RunStart 和命令，
+并按已验证状态发布 RunDeclaration/RxReport。车辆与 ROS2 的实际适配在网关层；
+本模块可作为入口运行，且发布方法可能产生真实官方 MQTT 消息。
 """
 
 from __future__ import annotations
@@ -22,11 +20,17 @@ from typing import Iterable, Mapping, Sequence
 try:
     from .course_store import CourseStore
     from .course_config import make_payload, fingerprint, validate_geofence_within_course
-    from .geofence_planner import calculate_geofence_from_course, calculate_geofence_from_course_union, validate_geofence_altitude
+    from .geofence_planner import (
+        calculate_geofence_from_course, calculate_geofence_from_course_union,
+        validate_geofence_altitude,
+    )
 except ImportError:  # Script/test execution directly from the OCS directory.
     from course_store import CourseStore
     from course_config import make_payload, fingerprint, validate_geofence_within_course
-    from geofence_planner import calculate_geofence_from_course, calculate_geofence_from_course_union, validate_geofence_altitude
+    from geofence_planner import (
+        calculate_geofence_from_course, calculate_geofence_from_course_union,
+        validate_geofence_altitude,
+    )
 
 try:
     import paho.mqtt.client as mqtt
@@ -80,12 +84,19 @@ TYPE_MAP = {
 }
 TASK_MAP = {
     "unknown": rx_common_pb2.TASK_UNKNOWN,
+    "task_unknown": rx_common_pb2.TASK_UNKNOWN,
     "none": rx_common_pb2.TASK_NONE,
+    "task_none": rx_common_pb2.TASK_NONE,
     "safe-passage": rx_common_pb2.TASK_SAFE_PASSAGE,
+    "task_safe_passage": rx_common_pb2.TASK_SAFE_PASSAGE,
     "infra-survey-repair": rx_common_pb2.TASK_INFRA_SURVEY_REPAIR,
+    "task_infra_survey_repair": rx_common_pb2.TASK_INFRA_SURVEY_REPAIR,
     "coordinated-logistics": rx_common_pb2.TASK_COORDINATED_LOGISTICS,
+    "task_coordinated_logistics": rx_common_pb2.TASK_COORDINATED_LOGISTICS,
     "dynamic-incident": rx_common_pb2.TASK_DYNAMIC_INCIDENT,
+    "task_dynamic_incident": rx_common_pb2.TASK_DYNAMIC_INCIDENT,
     "task1": rx_common_pb2.TASK_SAFE_PASSAGE,
+    "task2": rx_common_pb2.TASK_INFRA_SURVEY_REPAIR,
     "task3": rx_common_pb2.TASK_COORDINATED_LOGISTICS,
     "task4": rx_common_pb2.TASK_DYNAMIC_INCIDENT,
 }
@@ -112,12 +123,14 @@ COLOR_MAP = {
 
 
 def now_timestamp() -> Timestamp:
+    # 职责：生成官方 Protobuf 当前时间戳，供每条官方上行消息写入发送时间。
     value = Timestamp()
     value.GetCurrentTime()
     return value
 
 
 def _enum(value: int | str, names: Mapping[str, int], label: str) -> int:
+    # 职责：把可读枚举名或整数转换为官方枚举值，并拒绝未知名称。
     if isinstance(value, int):
         return value
     key = value.lower()
@@ -127,6 +140,7 @@ def _enum(value: int | str, names: Mapping[str, int], label: str) -> int:
 
 
 def _lat_lng(latitude: float, longitude: float) -> common_pb2.LatLng:
+    # 职责：校验经纬度范围后构造官方 LatLng Protobuf 对象。
     if not -90 <= latitude <= 90:
         raise ValueError("latitude must be between -90 and 90")
     if not -180 <= longitude <= 180:
@@ -135,9 +149,13 @@ def _lat_lng(latitude: float, longitude: float) -> common_pb2.LatLng:
 
 
 class OcsClient:
-    """MQTT client for the official RoboCommand topics."""
+    """维护官方会话、Course/Run 状态、声明和报告序号的 MQTT 客户端。
+
+Gateway 使用本类跨越官方协议边界；内部车辆动作仅入队，交由独立的内部链路发送。
+"""
 
     def __init__(
+        # 职责：初始化官方连接、Course/run/序号和内部动作队列状态；不在此处连接网络。
         self,
         broker_host: str,
         broker_port: int,
@@ -200,27 +218,33 @@ class OcsClient:
 
     @property
     def request_topic(self) -> str:
+        # 职责：返回本队官方请求发布 topic。
         return f"{TOPIC_ROOT}/{self.team_id}/request"
 
     @property
     def command_topic(self) -> str:
+        # 职责：返回本队官方命令订阅 topic。
         return f"{TOPIC_ROOT}/{self.team_id}/command"
 
     @property
     def course_fingerprint(self) -> str | None:
+        # 职责：只读返回当前已验收 Course 的内容指纹。
         """Fingerprint of the only Course eligible for declaration/start gating."""
         return self._course_fingerprint
 
     def connect(self) -> None:
+        # 职责：发起官方 Broker 异步连接并启动 Paho 网络循环。
         print(f"Connecting OCS to MQTT {self.broker_host}:{self.broker_port} ...")
         self.client.connect(self.broker_host, self.broker_port, keepalive=60)
         self.client.loop_start()
 
     def close(self) -> None:
+        # 职责：停止 Paho 网络循环并关闭官方 Broker 连接。
         self.client.loop_stop()
         self.client.disconnect()
 
     def _on_connect(self, client, _userdata, _flags, reason_code, _properties=None) -> None:
+        # 职责：连接成功后订阅官方 Course/Command topic 并记录连接状态。
         if reason_code != 0:
             self.connected = False
             self._record_runtime_event("mqtt", "connect_failed", detail=str(reason_code))
@@ -231,6 +255,7 @@ class OcsClient:
         print(f"[MQTT] connected; subscribed to {TOPIC_ROOT}/course and {self.command_topic}")
 
     def _on_disconnect(self, _client, _userdata, _disconnect_flags, reason_code, _properties=None) -> None:
+        # 职责：记录官方连接断开，供运行状态与重连诊断使用。
         self.connected = False
         # Any Course acknowledgement from the previous MQTT connection is no
         # longer eligible to release a held RunStart.
@@ -251,6 +276,7 @@ class OcsClient:
         print(f"[MQTT] disconnected: {reason_code}")
 
     def _on_message(self, _client, _userdata, message) -> None:
+        # 职责：解码官方入站包，并按 topic 分派 Course 或 Command 的验收逻辑。
         try:
             if message.topic == f"{TOPIC_ROOT}/course":
                 decoded = rx_course_pb2.RxCourse()
@@ -269,6 +295,7 @@ class OcsClient:
             print(f"[MQTT] cannot decode {message.topic}: {exc}", file=sys.stderr)
 
     def _record_runtime_event(self, source: str, event: str, *, topic: str | None = None,
+        # 职责：保存有限长度的运行诊断事件；不改变协议状态或发送消息。
                               run_id: int | None = None, command_seq: int | None = None,
                               detail: str = "") -> None:
         """Keep bounded transport diagnostics; never retries control work."""
@@ -281,6 +308,7 @@ class OcsClient:
 
     @staticmethod
     def _validate_course(course: rx_course_pb2.RxCourse) -> None:
+        # 职责：检查官方 Course 的必需字段和几何数据是否可安全缓存。
         # make_payload performs the frozen range and polygon validation.
         make_payload(
             course_id=course.course_id, pinger_freq_hz=course.pinger_freq_hz,
@@ -291,6 +319,7 @@ class OcsClient:
         )
 
     def _accept_course(self, course: rx_course_pb2.RxCourse) -> None:
+        # 职责：验收新 Course、更新指纹/缓存，并排队通知内部系统同步。
         self._validate_course(course)
         source_sent_at = course.sent_at.ToDatetime(tzinfo=timezone.utc) if (course.sent_at.seconds or course.sent_at.nanos) else None
         payload = make_payload(
@@ -324,6 +353,7 @@ class OcsClient:
             sent_at=source_sent_at,
         )
         self._course_received_epoch = self._course_connection_epoch
+        print(f"[COURSE_RECEIVED] course_id={course.course_id} fingerprint={new_fingerprint}")
         if new_fingerprint != self._course_fingerprint:
             self._course_fingerprint = new_fingerprint
             self._queue_internal_action({
@@ -332,6 +362,7 @@ class OcsClient:
             })
 
     def queue_course_sync(self) -> None:
+        # 职责：将当前 Course 转为内部同步动作；实际发送由 Gateway/VehicleLink 完成。
         """Queue the latest valid Course after an internal-link reconnect.
 
         This is transport synchronization only, not an FSM-applied acknowledgement.
@@ -349,6 +380,7 @@ class OcsClient:
         })
 
     def _accept_command(self, command: rx_commands_pb2.RxCommand) -> None:
+        # 职责：验证官方命令顺序和前置条件，再决定是否排队内部动作。
         if command.team_id != self.team_id:
             raise ValueError("RxCommand.team_id does not match the configured team")
         if not command.seq or command.seq <= self._last_command_seq:
@@ -369,6 +401,7 @@ class OcsClient:
                 self.last_rejection_reason = "RunStart received before a valid RxCourse"
                 raise ValueError(self.last_rejection_reason)
             self.run_id = command.run_start.run_id
+            pre_run_heartbeats = self.heartbeat_cache.bind_pre_run_entries(self.run_id)
             self.last_rejection_reason = None
             self._relayed_official_commands[command.seq] = "run_start"
             self._queue_internal_action({
@@ -377,12 +410,16 @@ class OcsClient:
                 "run_id": self.run_id,
                 "command": "RUN_START",
                 "command_seq": command.seq,
+                # Preserve the official identity fields for isolated test
+                # receivers.  They are populated only after all checks above.
+                "official_team_id": command.team_id,
+                "declaration_seq": command.run_start.declaration_seq,
                 "course_fingerprint": self._course_fingerprint,
                 "priority": "NORMAL",
                 "preempt": False,
                 "parameters": {"role": "mission_coordinator"},
             })
-            print(f"[RunStart] accepted declaration_seq={self.declaration_seq} run_id={self.run_id}")
+            print(f"[RunStart] accepted declaration_seq={self.declaration_seq} run_id={self.run_id} pre_run_heartbeats={pre_run_heartbeats}")
         elif body in {
             "assistance_request", "keep_out_zone", "all_clear",
             "moving_object_alert", "readiness_confirm",
@@ -398,9 +435,11 @@ class OcsClient:
         self.last_command.CopyFrom(command)
 
     def _queue_internal_action(self, *actions: dict) -> None:
+        # 职责：保存待转发给内部车辆/FSM 的动作，不跨越 MQTT 边界。
         self._pending_internal_actions.extend(actions)
 
     def drain_internal_actions(self) -> list[dict]:
+        # 职责：取出并清空已验证内部动作队列，供 Gateway 单次转发。
         """Return and clear actions for the independent vehicle MQTT adapter.
 
         Each returned action is converted to the team JSON envelope by the
@@ -413,6 +452,7 @@ class OcsClient:
         return actions
 
     def accept_vehicle_ack(
+        # 职责：验证车辆 ACK 与已转发官方命令的关联关系。
         self,
         vehicle_id: str,
         *,
@@ -441,6 +481,7 @@ class OcsClient:
         return []
 
     def accept_vehicle_readiness_report(
+        # 职责：将车辆 Readiness 信息与官方报告序号关联后生成上行报告。
         self,
         vehicle_id: str,
         *,
@@ -480,6 +521,7 @@ class OcsClient:
         return []
 
     def accept_vehicle_envelope(self, envelope: Mapping) -> None:
+        # 职责：按内部 envelope 类型分派车辆心跳、ACK、任务报告或故障。
         """Translate one internal vehicle message to RoboCommand.
 
         This is deliberately a protocol adapter, not a task arbiter.  The
@@ -522,6 +564,7 @@ class OcsClient:
             raise ValueError(f"unsupported vehicle message kind: {kind}")
 
     def accept_fsm_status(self, raw: str) -> None:
+        # 职责：验收 FSM 状态 JSON，更新 Course ACK/任务权威状态并记录诊断。
         """Record formal FSM status and accept only a current Course-applied ACK.
 
         The status channel is the only source considered for Course readiness;
@@ -586,6 +629,7 @@ class OcsClient:
         return True
 
     def accept_fsm_task_report(self, raw: str) -> None:
+        # 职责：接收 FSM 任务报告 JSON 并映射为允许的官方报告。
         """Consume an FSM ROS 2 report only when it explicitly carries an official report.
 
         OCS never infers a RoboCommand result from FSM progress/status.  This
@@ -646,6 +690,7 @@ class OcsClient:
         self.accept_vehicle_task_report(vehicle_id, normalized)
 
     def accept_fsm_fault(self, raw: str) -> None:
+        # 职责：接收 FSM 故障 JSON，记录诊断并按合约处理可报告字段。
         """Record a formal FSM fault without inventing an official RxReport body."""
         value = json.loads(raw)
         if not isinstance(value, dict):
@@ -667,6 +712,7 @@ class OcsClient:
         return {"usv": "T-Wave", "uav": "T-Sky"}.get(value)
 
     def set_authoritative_current_task(self, vehicle_id: str, current_task: str | None) -> None:
+        # 职责：更新由权威 FSM 提供的当前任务，供 Heartbeat 报告使用。
         """Set task state only from a confirmed MissionCoordinator contract."""
         self._check_vehicle(vehicle_id)
         if current_task is None:
@@ -675,22 +721,60 @@ class OcsClient:
         _enum(current_task, TASK_MAP, "current_task")
         self._authoritative_current_task[vehicle_id] = current_task
 
-    def _accept_vehicle_heartbeat(self, envelope: Mapping) -> None:
+    def _accept_vehicle_heartbeat(self, envelope: Mapping) -> bool:
+        # 职责：将车辆心跳交给缓存校验，失败时仅记录拒绝原因。
         try:
             self.heartbeat_cache.accept(envelope, active_run_id=self.run_id)
         except HeartbeatRejected as exc:
-            print(f"[VehicleHeartbeat] rejected {envelope.get('vehicle_id')}: {exc}", file=sys.stderr)
+            print(f"[HEARTBEAT_REJECTED] vehicle_id={envelope.get('vehicle_id')!r} reason={exc}", file=sys.stderr)
+            return False
+        return True
 
     def accept_uav_status(self, status: Mapping) -> None:
+        # 职责：保存只读 UAV 状态诊断；不据此伪造官方 Heartbeat。
         """Retain validated ROS2 UAV telemetry for diagnostics only.
 
-        The documented UAV JSON lacks authoritative roll/pitch/current-task,
-        so it must not be silently promoted to an official Heartbeat.
+        Only a complete, explicitly-real source snapshot may enter the same
+        cache used by the 2 Hz official publisher. Display telemetry remains
+        available even when the official-reporting contract is incomplete.
         """
         self.latest_uav_status = dict(status)
-        self._record_runtime_event("ros2", "uav_status_received", detail="official heartbeat blocked: missing authoritative attitude/task")
+        print(
+            f"[UAV_STATUS_RECEIVED] vehicle_id={status.get('vehicle_id')!r} "
+            f"source={status.get('source')!r} state={status.get('state')!r} "
+            f"flight_phase={status.get('flight_phase')!r}"
+        )
+        try:
+            from .uav_status import heartbeat_block_reason, heartbeat_envelope
+        except ImportError:
+            from uav_status import heartbeat_block_reason, heartbeat_envelope
+        vehicle_id = status.get("vehicle_id")
+        if vehicle_id not in self._declared_vehicle_ids:
+            reason = "UAV is not in the current accepted RunDeclaration"
+        else:
+            reason = heartbeat_block_reason(status, run_id=self.run_id)
+        if reason is not None:
+            self._record_runtime_event("ros2", "uav_status_heartbeat_blocked", detail=reason)
+            print(f"[HEARTBEAT_REJECTED] vehicle_id={vehicle_id!r} reason={reason}")
+            return
+        envelope = heartbeat_envelope(status, run_id=self.run_id)
+        if envelope is None:
+            self._record_runtime_event("ros2", "uav_status_heartbeat_blocked", detail="heartbeat gate changed during processing")
+            print("[HEARTBEAT_REJECTED] reason=heartbeat gate changed during processing")
+            return
+        if not self._accept_vehicle_heartbeat(envelope):
+            self._record_runtime_event("ros2", "uav_status_heartbeat_blocked", detail="heartbeat cache rejected UAV telemetry")
+            print("[HEARTBEAT_REJECTED] reason=heartbeat cache rejected UAV telemetry")
+            return
+        self.set_authoritative_current_task(str(vehicle_id), envelope["payload"]["current_task"])
+        source_mode = envelope["payload"]["source_mode"]
+        self._record_runtime_event("ros2", "uav_status_heartbeat_cached",
+                                   detail=f"validated UAV telemetry cached: {source_mode}")
+        print(f"[HEARTBEAT_CACHED] vehicle_id={vehicle_id!r} source={source_mode} "
+              f"freshness={envelope.get('timestamp_basis')}")
 
     def publish_cached_heartbeats(self) -> int:
+        # 职责：发布当前 run 中通过缓存门控的真实 Heartbeat；会产生官方 MQTT 报告。
         """Publish fresh telemetry at the gateway's 2 Hz timer cadence."""
         count = 0
         for vehicle_id in sorted(self._declared_vehicle_ids):
@@ -698,12 +782,31 @@ class OcsClient:
             if entry is None:
                 continue
             payload, position = entry.payload, entry.payload["position"]
-            self.publish_heartbeat(
+            current_task: int | str
+            if vehicle_id == "T-Wave":
+                # A USV task is part of the validated, real heartbeat.  Do not
+                # substitute an absent FSM value, and do not let a conflicting
+                # FSM view silently overwrite the vehicle's telemetry.
+                current_task = payload["current_task"]
+                authoritative_task = self._authoritative_current_task.get(vehicle_id)
+                if (authoritative_task is not None
+                        and _enum(authoritative_task, TASK_MAP, "current_task")
+                        != _enum(current_task, TASK_MAP, "current_task")):
+                    detail = ("USV heartbeat current_task conflicts with authoritative task: "
+                              f"heartbeat={current_task!r}, authoritative={authoritative_task!r}")
+                    self._record_runtime_event("heartbeat", "current_task_conflict",
+                                               topic="/tongji_mrl/twave/heartbeat", detail=detail)
+                    print(f"[HEARTBEAT_BLOCKED] vehicle_id={vehicle_id} reason={detail}", file=sys.stderr)
+                    continue
+            else:
+                # Preserve the established UAV authority path.
+                current_task = self._authoritative_current_task.get(vehicle_id, "unknown")
+            mid = self.publish_heartbeat(
                 vehicle_id, state=payload["state"],
                 latitude=float(position["latitude_deg"]), longitude=float(position["longitude_deg"]),
                 speed_mps=float(payload["speed_mps"]), heading_deg=float(payload["heading_deg"]),
                 vehicle_type=str(payload["vehicle_type"]),
-                current_task=self._authoritative_current_task.get(vehicle_id, "unknown"),
+                current_task=current_task,
                 roll_deg=float(payload["roll_deg"]), pitch_deg=float(payload["pitch_deg"]),
                 altitude_hae_m=float(position["altitude_hae_m"]),
                 depth_m=float(payload.get("depth_m", 0.0)),
@@ -714,6 +817,7 @@ class OcsClient:
         return count
 
     def accept_vehicle_task_report(self, vehicle_id: str, payload: Mapping) -> None:
+        # 职责：验证内部任务报告并调用对应官方报告发布路径。
         """Publish an explicitly supplied official report.
 
         A plain ``phase=COMPLETE`` is logged but is not converted into an
@@ -763,6 +867,7 @@ class OcsClient:
             raise ValueError(f"unsupported official_report type: {report_type}")
 
     def _relay_official_command(self, command: rx_commands_pb2.RxCommand) -> dict:
+        # 职责：把允许转发的官方命令转换为内部动作字典。
         """Convert an official Task 4 command into one USV-facing action.
 
         This is routing and serialization only. The USV decides whether the
@@ -847,18 +952,21 @@ class OcsClient:
         }
 
     def _check_vehicle(self, vehicle_id: str) -> None:
+        # 职责：确认车辆已在当前声明中，避免向未声明车辆发布官方报告。
         if not vehicle_id:
             raise ValueError("vehicle_id must not be empty")
         if self._declared_vehicle_ids and vehicle_id not in self._declared_vehicle_ids:
             raise ValueError(f"vehicle_id {vehicle_id!r} was not declared for this run")
 
     def _next_report_seq(self, vehicle_id: str) -> int:
+        # 职责：为每辆车分配递增的官方报告序号。
         with self._report_lock:
             seq = self._report_seq.get(vehicle_id, 0) + 1
             self._report_seq[vehicle_id] = seq
             return seq
 
     def _publish_vehicle_body(self, vehicle_id: str, body_name: str, body) -> int:
+        # 职责：封装单个官方 RxReport body、分配车辆序号并发布。
         self._check_vehicle(vehicle_id)
         seq = self._next_report_seq(vehicle_id)
         report = rx_reports_pb2.RxReport(
@@ -869,9 +977,21 @@ class OcsClient:
         )
         getattr(report, body_name).CopyFrom(body)
         topic = f"{TOPIC_ROOT}/{self.team_id}/{vehicle_id}/report"
-        return self._publish(topic, report)
+        mid = self._publish(topic, report)
+        heartbeat = report.heartbeat
+        print(
+            f"[HEARTBEAT_PUBLISHED] topic={topic} vehicle_id={report.vehicle_id} seq={report.seq} "
+            f"state={common_pb2.RobotState.Name(heartbeat.state)} "
+            f"vehicle_type={rx_common_pb2.VehicleType.Name(heartbeat.vehicle_type)} "
+            f"current_task={rx_common_pb2.RxTask.Name(heartbeat.current_task)} "
+            f"flight_phase={rx_common_pb2.FlightPhase.Name(heartbeat.flight_phase)} "
+            f"uav_registration={heartbeat.uav_registration!r}"
+        )
+        print(f"[HEARTBEAT_PUBACK] topic={topic} vehicle_id={report.vehicle_id} seq={report.seq} mid={mid}")
+        return mid
 
     def _publish(self, topic: str, message) -> int:
+        # 职责：以 QoS1 发送官方 Protobuf，并等待/检查 PUBACK 结果。
         result = self.client.publish(topic, message.SerializeToString(), qos=1)
         result.wait_for_publish()
         if result.rc != mqtt.MQTT_ERR_SUCCESS:
@@ -881,6 +1001,7 @@ class OcsClient:
         return result.mid
 
     def publish_run_declaration(
+        # 职责：构建、校验并发布官方 RunDeclaration；调用会发送正式官方消息。
         self,
         vehicle_ids: Sequence[str],
         task_tiers: Sequence[int | str] = ("disruptive", "none", "disruptive", "disruptive"),
@@ -888,7 +1009,7 @@ class OcsClient:
         uav_geofence_max_altitude_hae_m: float | None = None,
         uav_pilot_callsign: str | None = None,
         uav_geofence_mode: str = "manual",
-        uav_geofence_margin_m: float = 2.0,
+        uav_geofence_margin_m: float = 1.0,
         uav_geofence_altitude_limit_hae_m: float = 50.0,
     ) -> int:
         declaration = self._build_run_declaration(
@@ -902,6 +1023,7 @@ class OcsClient:
         return self._publish_run_declaration(declaration)
 
     def _build_run_declaration(
+        # 职责：把已验收 Course、任务等级与围栏参数组装为官方声明对象。
         self,
         vehicle_ids: Sequence[str],
         task_tiers: Sequence[int | str] = ("disruptive", "none", "disruptive", "disruptive"),
@@ -909,7 +1031,7 @@ class OcsClient:
         uav_geofence_max_altitude_hae_m: float | None = None,
         uav_pilot_callsign: str | None = None,
         uav_geofence_mode: str = "manual",
-        uav_geofence_margin_m: float = 2.0,
+        uav_geofence_margin_m: float = 1.0,
         uav_geofence_altitude_limit_hae_m: float = 50.0,
     ) -> rx_requests_pb2.RunDeclaration:
         """Validate a declaration without advancing sequences or publishing."""
@@ -934,14 +1056,29 @@ class OcsClient:
                 raise ValueError("automatic geofence mode and a manual uav_geofence cannot be combined")
             if not has_declared_uav:
                 raise ValueError("automatic geofence mode requires a declared UAV (T-Sky or a UAV-prefixed vehicle_id)")
-            if uav_geofence_mode == "auto_course_union":
-                configured_fence = calculate_geofence_from_course_union(
-                    course.corners, course.uav_transit_area, margin_m=uav_geofence_margin_m,
-                )
-            else:
+            # Both legacy automatic mode names now use the received geometry
+            # exactly: Course ∪ Transit only when Transit was actually sent.
+            # Do not substitute the old inscribed-ring planner, which could
+            # exclude valid parts of the received Course.
+            if uav_geofence_mode == "auto_course":
+                # Transit is a permitted route, not a default expansion of
+                # the declared operating enclosure.
                 configured_fence = calculate_geofence_from_course(
                     course.corners, margin_m=uav_geofence_margin_m,
                 )
+                source_name = "Course corners only (UAV transit area excluded)"
+            else:
+                # Expansion into transit is an explicit operator opt-in.
+                configured_fence = calculate_geofence_from_course_union(
+                    course.corners, course.uav_transit_area, margin_m=uav_geofence_margin_m,
+                )
+                source_name = (
+                    "Course + received UAV transit area"
+                    if course.uav_transit_area else "Course only (no UAV transit area received)"
+                )
+            print(f"[Geofence] source: {source_name}; inward buffer: 1.0 m")
+            print("[Geofence] received Course corners (lat,lon):", list(course.corners))
+            print("[Geofence] received UAV transit area (lat,lon):", list(course.uav_transit_area))
             print("[Geofence] OCS calculated candidate (lat,lon):", configured_fence)
             print("[Geofence] Operator must verify FCU fence and approved operating area")
         fence = [_lat_lng(lat, lng) for lat, lng in configured_fence]
@@ -974,6 +1111,7 @@ class OcsClient:
         )
 
     def _publish_run_declaration(self, declaration: rx_requests_pb2.RunDeclaration,
+        # 职责：封装声明请求、更新声明状态并以 QoS1 发布官方消息。
                                  *, preserve_report_sequences: bool = False) -> int:
         """Send a prepared declaration; callers own its prior validation.
 
@@ -1002,9 +1140,12 @@ class OcsClient:
         )
         self.declaration_seq = request.seq
         self._declaration_course_fingerprint = self._course_fingerprint
-        return self._publish(self.request_topic, request)
+        mid = self._publish(self.request_topic, request)
+        print(f"[DECLARATION_PUBLISHED] seq={request.seq} vehicles={list(declaration.vehicle_ids)} mid={mid}")
+        return mid
 
     def publish_heartbeat(
+        # 职责：把指定车辆的已确认字段映射为官方 Heartbeat 并发布。
         self,
         vehicle_id: str,
         *,
@@ -1053,6 +1194,7 @@ class OcsClient:
         return self._publish(topic, report)
 
     def publish_safe_passage_report(
+        # 职责：发布 Task1 SafePassage 官方报告。
         self,
         vehicle_id: str,
         *,
@@ -1073,6 +1215,7 @@ class OcsClient:
         return self._publish_vehicle_body(vehicle_id, "safe_passage", body)
 
     def publish_docking_report(self, vehicle_id: str, bay_id: int) -> int:
+        # 职责：发布 Docking 官方报告。
         if not 1 <= bay_id <= 3:
             raise ValueError("bay_id must be between 1 and 3")
         return self._publish_vehicle_body(
@@ -1080,6 +1223,7 @@ class OcsClient:
         )
 
     def publish_firefighting_report(self, vehicle_id: str, window_id: int) -> int:
+        # 职责：发布 Firefighting 官方报告。
         if window_id <= 0:
             raise ValueError("window_id must be positive")
         return self._publish_vehicle_body(
@@ -1089,6 +1233,7 @@ class OcsClient:
         )
 
     def publish_resource_delivery_request(
+        # 职责：发布 ResourceDelivery 官方请求。
         self,
         vehicle_id: str,
         *,
@@ -1106,6 +1251,7 @@ class OcsClient:
         return self._publish_vehicle_body(vehicle_id, "resource_delivery", body)
 
     def publish_incident_ack(self, vehicle_id: str, command_seq: int) -> int:
+        # 职责：发布与官方命令序号关联的 Incident ACK。
         if command_seq <= 0:
             raise ValueError("command_seq must be positive")
         return self._publish_vehicle_body(
@@ -1113,6 +1259,7 @@ class OcsClient:
         )
 
     def publish_readiness_report(self, vehicle_id: str, command_seq: int) -> int:
+        # 职责：发布车辆 Readiness 报告并保持命令关联。
         if command_seq <= 0:
             raise ValueError("command_seq must be positive")
         _report_seq, publish_mid = self._publish_readiness_report_with_sequence(
@@ -1121,6 +1268,7 @@ class OcsClient:
         return publish_mid
 
     def _publish_readiness_report_with_sequence(
+        # 职责：使用指定官方报告序号构造并发布 Readiness 报告。
         self, vehicle_id: str, command_seq: int
     ) -> tuple[int, int]:
         """Publish ReadinessReport and retain its official per-vehicle seq."""
@@ -1140,11 +1288,13 @@ class OcsClient:
 
 
 def load_config(path: Path) -> dict:
+    # 职责：读取并验证 JSON 配置根对象。
     with path.open(encoding="utf-8") as handle:
         return json.load(handle)
 
 
 def config_values(config: dict) -> tuple[str, str, int, list[str]]:
+    # 职责：提取 OCS 连接所需的 Team、Broker 与车辆配置值。
     team_id = config.get("team_id", "TONG")
     official = config.get("robocommand", {})
     internal = config.get("internal_broker", {})
@@ -1161,6 +1311,7 @@ def config_values(config: dict) -> tuple[str, str, int, list[str]]:
 
 
 def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tuple[float, float]], float | None, str | None]:
+    # 职责：提取声明任务等级、围栏、高度与飞手字段。
     declaration = config.get("run_declaration", {})
     tiers = declaration.get("task_tiers", {})
     task_tiers = (
@@ -1179,16 +1330,18 @@ def declaration_values(config: dict) -> tuple[tuple[str, str, str, str], list[tu
 
 
 def geofence_options(config: dict) -> tuple[str, float, float]:
+    # 职责：提取围栏生成模式、边距与 HAE 限制。
     """Mode, inward clearance in meters, and local maximum height (HAE)."""
     declaration = config.get("run_declaration", {})
     return (
         str(declaration.get("uav_geofence_mode", "manual")),
-        declaration.get("uav_geofence_margin_m", 2.0),
+        declaration.get("uav_geofence_margin_m", 1.0),
         declaration.get("uav_geofence_altitude_limit_hae_m", 50.0),
     )
 
 
 def main() -> int:
+    # 职责：解析命令行、加载配置并驱动官方客户端运行入口。
     parser = argparse.ArgumentParser(
         description="Tongji OCS client for the official RoboCommand MQTT interface",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

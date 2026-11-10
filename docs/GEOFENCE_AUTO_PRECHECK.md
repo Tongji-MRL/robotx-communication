@@ -11,15 +11,15 @@
   "task_tiers": {"task1": "disruptive", "task2": "none", "task3": "disruptive", "task4": "disruptive"},
   "uav_geofence_mode": "auto_course",
   "uav_geofence": [],
-  "uav_geofence_margin_m": 2.0,
+  "uav_geofence_margin_m": 1.0,
   "uav_geofence_max_altitude_hae_m": 40.0,
   "uav_geofence_altitude_limit_hae_m": 50.0,
   "uav_pilot_callsign": "实际飞手呼号，必须人工填写"
 }
 ```
 
-- `uav_geofence_mode`: `auto_course` = 从当前有效 RxCourse `corners` 计算一个保守的闭合候选多边形；`manual` = 继续使用 `uav_geofence` 中人工提供的点。
-- `uav_geofence_margin_m`: 自动围栏与 Course 边缘的最小内缩安全距离（m），默认 2 m，调整需考虑实际航线、起降位置和 GNSS 误差。
+- `uav_geofence_mode`: `auto_course`（以及兼容名称 `auto_course_union`）= 从当前有效 RxCourse 的真实几何计算闭合候选多边形；`manual` = 继续使用 `uav_geofence` 中人工提供的点。
+- `uav_geofence_margin_m`: 自动围栏固定为 1 m 内缩；非 1 m 会拒绝生成，避免各部署产生不一致的候选区域。
 - `uav_geofence_max_altitude_hae_m`: **本次拟申报的最高 HAE 高度**。改成 55 m 可验证本地“超高拒绝”；并非实际可以飞到 55 m。
 - `uav_geofence_altitude_limit_hae_m`: **OCS 本地高度门槛**，默认 50 m，对应官方示例 RC-test Server 的上限，允许设得更严格（例如 30 m）；不能仅通过修改此参数擅自提高官方允许的高度。
 - `uav_pilot_callsign`: 真实飞手呼号，不可使用占位值发送真正的申报。
@@ -29,12 +29,12 @@
 ## 2. 算法及限制
 
 1. 等待 RBC 经 MQTT 发送并被 OCS 验证的 `RxCourse`；读取原始 `corners` 与 `uav_transit_area`，保留全部顶点。
-2. 仅使用 `corners` 在局部米制平面中寻找离边界有最大余量的内部位置。
-3. 在安全的内接圆盘内生成 12 顶点闭合多边形，不猜测或拼接不规则的 Course/Transit 外轮廓，不扩大官方允许区。
+2. 若收到了非空 `uav_transit_area`，在局部米制平面计算 `Union(corners, uav_transit_area)`；未收到时仅使用 `corners`。不会补造 transit 或 corner 顶点。
+3. 对上述真实区域使用 GEOS/Shapely 作精确 `buffer(-1 m)`；结果为多块区域、含孔洞、空区域或无效时拒绝生成，要求人工提供经审批的 `manual` 围栏。
 4. 使用闭合性、自交、顶点及边界包含性验证，并验证可配置的申报高度。
 5. 原始坐标保持经纬度十进制度，打包成 `common_pb2.LatLng`，在 `RxRequest.run_declaration` 中通过 MQTT Protobuf 发送。
 
-**重要：自动候选通常只是 Course 中心附近的一块保守区域，可能不包含无人机在 `uav_transit_area` 的实际起降地点，因此不能未经人工核验用于实际飞行。** 如果真实航线必须跨越 Course 和 Transit Area，请在 `manual` 模式提供飞手审批过且 FCU 实际应用的围栏，OCS 会在两区域合并的允许范围内检查边和顶点；对不规则或包含孔洞的复合多边形仍应进行独立严格几何核验。
+**重要：自动候选不会再缩成 Course 中心附近的内接圆。** 它覆盖收到的 Course，且仅在收到 transition 时覆盖其与 Course 的并集；但仍须由飞手核验实际起降点、港口/浮标坐标与 FCU 已应用的围栏。若结果不能由单一无孔闭合环表达，请使用经审批的 `manual` 围栏。
 
 这部分并不是将 UAV 原始 GPS 坐标变换到 NED。经纬度直接作为 `LatLng(latitude, longitude)` 发送。高度必须由飞手确认是 HAE，而不是 AGL。
 

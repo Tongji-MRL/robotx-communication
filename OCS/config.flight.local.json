@@ -1,0 +1,32 @@
+{
+    "team_id":  "TONG",
+    "robocommand":  {
+                        "host":  "192.168.70.74",
+                        "port":  1904
+                    },
+    "vehicles":  {
+                     "uav":  {
+                                 "vehicle_id":  "T-Sky",
+                                 "source_vehicle_id":  "UAV1",
+                                 "trusted_status_topic":  true,
+                                 "use_ocs_receipt_for_freshness":  true,
+                                 "uav_registration":  "TONG-53580"
+                             }
+                 },
+    "run_declaration":  {
+                            "task_tiers":  {
+                                               "task1":  "none",
+                                               "task2":  "none",
+                                               "task3":  "none",
+                                               "task4":  "none"
+                                           },
+                            "uav_geofence_mode":  "auto_course_union",
+                            "uav_geofence":  [
+
+                                             ],
+                            "uav_geofence_margin_m":  1.0,
+                            "uav_geofence_max_altitude_hae_m":  40.0,
+                            "uav_geofence_altitude_limit_hae_m":  50.0,
+                            "uav_pilot_callsign":  "zhankun"
+                        }
+}

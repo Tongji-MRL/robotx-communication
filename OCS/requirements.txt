@@ -1,3 +1,4 @@
 # Keep these aligned with RobotX_2026/rc_test/requirements.txt.
 paho-mqtt==2.0.0
 protobuf==7.35
+shapely==2.2.0

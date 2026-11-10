@@ -141,7 +141,12 @@ def calculate_geofence_from_course_union(
     course_corners: Iterable[tuple[float, float]], uav_transit_area: Iterable[tuple[float, float]] = (), *,
     margin_m: float = 1.0,
 ) -> list[tuple[float, float]]:
-    """Return ``Buffer(Union(Course, Transit), -margin_m)`` in ``(lat, lon)``.
+    """Return the received operating area inset by one metre in ``(lat, lon)``.
+
+    When ``uav_transit_area`` is present, the operating area is
+    ``Union(Course, Transit)``.  When it is absent, it is *only* ``Course``.
+    In particular, this function never synthesizes transition or Course
+    vertices to make an automatic fence larger than the received geometry.
 
     This intentionally requires the approved GEOS/Shapely geometry engine: a
     hand-written union/buffer implementation could silently lose holes or a

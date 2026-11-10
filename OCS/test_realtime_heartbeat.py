@@ -3,6 +3,7 @@ import time
 
 from heartbeat_cache import HeartbeatCache, HeartbeatRejected
 from ros2_telemetry import Ros2TelemetryAdapter
+from uav_status import normalize_uav_status
 
 
 def heartbeat(vehicle_id, *, now=1_000_000, run_id=42, message_id="m", mode="simulation"):
@@ -13,6 +14,8 @@ def heartbeat(vehicle_id, *, now=1_000_000, run_id=42, message_id="m", mode="sim
         "speed_mps": 3.0, "heading_deg": 90.0, "roll_deg": 1.0, "pitch_deg": 2.0,
         "health": {"fcu_connected": True, "simulator": mode == "simulation"},
     }
+    if vehicle_id == "T-Wave":
+        payload["current_task"] = "TASK_NONE"
     if vehicle_id == "T-Sky":
         payload["flight_phase"] = "airborne"
     return {"kind": "heartbeat", "vehicle_id": vehicle_id, "source": vehicle_id,
@@ -57,6 +60,27 @@ class RealtimeHeartbeatTests(unittest.TestCase):
         with self.assertRaises(HeartbeatRejected):
             self.cache.accept(fake_real, active_run_id=42)
 
+    def test_usv_requires_an_explicit_legal_current_task(self):
+        missing = heartbeat("T-Wave", message_id="missing-task")
+        del missing["payload"]["current_task"]
+        with self.assertRaisesRegex(HeartbeatRejected, "current_task"):
+            self.cache.accept(missing, active_run_id=42)
+        invalid = heartbeat("T-Wave", message_id="invalid-task")
+        invalid["payload"]["current_task"] = "TASK_MADE_UP"
+        with self.assertRaisesRegex(HeartbeatRejected, "current_task"):
+            self.cache.accept(invalid, active_run_id=42)
+
+    def test_usv_cache_accepts_all_official_task_names(self):
+        for index, task in enumerate((
+            "TASK_UNKNOWN", "TASK_NONE", "TASK_SAFE_PASSAGE",
+            "TASK_INFRA_SURVEY_REPAIR", "TASK_COORDINATED_LOGISTICS",
+            "TASK_DYNAMIC_INCIDENT",
+        )):
+            self.now += 1
+            sample = heartbeat("T-Wave", now=self.now, message_id=f"official-task-{index}")
+            sample["payload"]["current_task"] = task
+            self.cache.accept(sample, active_run_id=42)
+
     def test_ros_adapter_is_read_only_and_requires_complete_confirmed_data(self):
         adapter = Ros2TelemetryAdapter("T-Sky", now_ms=lambda: self.now)
         self.assertIsNone(adapter.heartbeat_payload())
@@ -72,6 +96,110 @@ class RealtimeHeartbeatTests(unittest.TestCase):
 
 
 class OcsHeartbeatPublicationTests(unittest.TestCase):
+    def test_declared_pre_run_heartbeat_publishes_and_binds_to_real_run(self):
+        import ocs_client
+        client = ocs_client.OcsClient("127.0.0.1", 1883)
+        published = []
+        client._publish = lambda topic, message: published.append((topic, message)) or len(published)
+        client._declared_vehicle_ids = {"T-Sky"}
+        now = int(time.time() * 1000)
+        status = normalize_uav_status({
+            "vehicle_id": "UAV1", "vehicle_type": "TYPE_UAV", "state": "STATE_MANUAL",
+            "flight_phase": "FLIGHT_PHASE_GROUNDED", "position": {"latitude": 1.2, "longitude": 103.8},
+            "altitude_hae_m": 20.0, "spd_mps": 0.0, "heading_deg": 180.0,
+            "timestamp_unix_ms": now, "source_mode": "real", "roll_deg": 1.0, "pitch_deg": -2.0,
+            "current_task": "TASK_NONE", "health": {"fcu_connected": True},
+            "uav_registration": "TEST-UAV-001",
+        }, source_vehicle_id="UAV1", vehicle_id="T-Sky")
+
+        client.accept_uav_status(status)
+        self.assertEqual(client.publish_cached_heartbeats(), 1)
+        self.assertEqual(published[-1][0], "robocommand/robotx/TONG/T-Sky/report")
+        self.assertEqual(published[-1][1].seq, 1)
+        report = published[-1][1]
+        self.assertEqual(report.team_id, "TONG")
+        self.assertEqual(report.vehicle_id, "T-Sky")
+        self.assertGreater(report.sent_at.seconds, 0)
+        self.assertEqual(report.heartbeat.vehicle_type, ocs_client.rx_common_pb2.TYPE_UAV)
+        self.assertEqual(report.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_NONE)
+        self.assertEqual(report.heartbeat.flight_phase, ocs_client.rx_common_pb2.FLIGHT_PHASE_GROUNDED)
+        self.assertEqual(report.heartbeat.uav_registration, "TEST-UAV-001")
+        client.run_id = 42
+        self.assertEqual(client.heartbeat_cache.bind_pre_run_entries(client.run_id), 1)
+        self.assertEqual(client.publish_cached_heartbeats(), 1)
+        self.assertEqual(published[-1][0], "robocommand/robotx/TONG/T-Sky/report")
+        self.assertEqual(published[-1][1].seq, 2)
+
+    def test_current_orin_snapshot_is_blocked_without_authoritative_fields(self):
+        import ocs_client
+        client = ocs_client.OcsClient("127.0.0.1", 1883)
+        client._declared_vehicle_ids = {"T-Sky"}
+        status = normalize_uav_status({
+            "vehicle_id": "UAV1", "vehicle_type": "TYPE_UAV", "state": "STATE_AUTO",
+            "flight_phase": "FLIGHT_PHASE_GROUNDED",
+            "position": {"latitude": 1.281550930606749, "longitude": 103.8544517713803},
+            "spd_mps": 0.010401902305601647, "heading_deg": 16.269135646287282,
+            "roll_deg": 0.09218245859619373, "pitch_deg": 0.8789420575508625,
+            "altitude_hae_m": 13.759857177734375, "current_task": None,
+            "uav_registration": "TONG-53580",
+        }, source_vehicle_id="UAV1", vehicle_id="T-Sky", uav_registration="TONG-53580")
+        client.accept_uav_status(status)
+        self.assertEqual(client.runtime_events[-1]["event"], "uav_status_heartbeat_blocked")
+        self.assertIn("timestamp", client.runtime_events[-1]["detail"])
+        self.assertEqual(client.publish_cached_heartbeats(), 0)
+
+    def test_configured_trusted_ros2_source_accepts_current_orin_shape(self):
+        import ocs_client
+        client = ocs_client.OcsClient("127.0.0.1", 1883)
+        published = []
+        client._publish = lambda topic, message: published.append((topic, message)) or len(published)
+        client._declared_vehicle_ids = {"T-Sky"}
+        now = int(time.time() * 1000)
+        status = normalize_uav_status({
+            "vehicle_id": "UAV1", "vehicle_type": "TYPE_UAV", "state": "STATE_AUTO",
+            "flight_phase": "FLIGHT_PHASE_GROUNDED",
+            "position": {"latitude": 1.281550930606749, "longitude": 103.8544517713803},
+            "spd_mps": 0.01, "heading_deg": 16.3, "roll_deg": 0.09, "pitch_deg": 0.95,
+            "altitude_hae_m": 14.2, "timestamp_unix_ms": now - 60_000, "current_task": None,
+            "uav_registration": "TONG-53580",
+        }, source_vehicle_id="UAV1", vehicle_id="T-Sky", uav_registration="TONG-53580",
+           trusted_status_source=True, use_ocs_receipt_for_freshness=True,
+           received_unix_ms=now)
+        client.accept_uav_status(status)
+        self.assertEqual(client.publish_cached_heartbeats(), 1)
+        report = published[-1][1]
+        self.assertEqual(report.team_id, "TONG")
+        self.assertEqual(report.vehicle_id, "T-Sky")
+        self.assertEqual(report.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_NONE)
+        self.assertEqual(report.heartbeat.vehicle_type, ocs_client.rx_common_pb2.TYPE_UAV)
+
+    def test_real_orin_status_enters_only_the_declared_uav_cache(self):
+        import ocs_client
+        client = ocs_client.OcsClient("127.0.0.1", 1883)
+        published = []
+        client._publish = lambda topic, message: published.append((topic, message)) or len(published)
+        client._declared_vehicle_ids = {"T-Sky"}
+        client.run_id = 42
+        now = int(time.time() * 1000)
+        status = normalize_uav_status({
+            "vehicle_id": "UAV1", "vehicle_type": "TYPE_UAV", "state": "STATE_AUTO",
+            "flight_phase": "FLIGHT_PHASE_AIRBORNE", "position": {"latitude": 1.2, "longitude": 103.8},
+            "altitude_hae_m": 20.0, "spd_mps": 4.0, "heading_deg": 180.0,
+            "timestamp_unix_ms": now, "source_mode": "real", "roll_deg": 1.0, "pitch_deg": -2.0,
+            "current_task": "TASK_SAFE_PASSAGE", "health": {"fcu_connected": True},
+            "uav_registration": "TEST-UAV-001",
+        }, source_vehicle_id="UAV1", vehicle_id="T-Sky")
+        client.accept_uav_status(status)
+        self.assertEqual(client.runtime_events[-1]["event"], "uav_status_heartbeat_cached")
+        self.assertEqual(client.publish_cached_heartbeats(), 1)
+        report = published[-1][1]
+        self.assertEqual(report.vehicle_id, "T-Sky")
+        self.assertEqual(report.heartbeat.state, ocs_client.common_pb2.STATE_AUTO)
+        self.assertEqual(report.heartbeat.vehicle_type, ocs_client.rx_common_pb2.TYPE_UAV)
+        self.assertEqual(report.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_SAFE_PASSAGE)
+        self.assertEqual(report.heartbeat.flight_phase, ocs_client.rx_common_pb2.FLIGHT_PHASE_AIRBORNE)
+        self.assertEqual(report.heartbeat.uav_registration, "TEST-UAV-001")
+
     def test_protobuf_mapping_and_shared_per_vehicle_sequence(self):
         # This verifies cache -> official RxReport without a live broker.
         import ocs_client
@@ -100,6 +228,7 @@ class OcsHeartbeatPublicationTests(unittest.TestCase):
         sky = next(report for report in reports if report.vehicle_id == "T-Sky")
         self.assertEqual(wave.heartbeat.position.latitude, 1.2)
         self.assertEqual(wave.heartbeat.heading_deg, 90.0)
+        self.assertEqual(wave.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_NONE)
         self.assertEqual(sky.heartbeat.roll_deg, 1.0)
         self.assertEqual(sky.heartbeat.flight_phase, ocs_client.rx_common_pb2.FLIGHT_PHASE_AIRBORNE)
         self.assertEqual(sky.heartbeat.current_task, ocs_client.rx_common_pb2.TASK_COORDINATED_LOGISTICS)
@@ -107,6 +236,20 @@ class OcsHeartbeatPublicationTests(unittest.TestCase):
         client.publish_docking_report("T-Wave", 1)
         self.assertEqual([message.seq for _topic, message in published[1:]
                           if message.vehicle_id == "T-Wave"], [1, 2])
+
+    def test_usv_task_conflict_is_logged_and_not_published(self):
+        import ocs_client
+        client = ocs_client.OcsClient("127.0.0.1", 1883)
+        published = []
+        client._publish = lambda topic, message: published.append((topic, message)) or len(published)
+        client._declared_vehicle_ids = {"T-Wave"}
+        client.run_id = 42
+        client.accept_vehicle_envelope(heartbeat("T-Wave", now=int(time.time() * 1000), message_id="wave"))
+        client.set_authoritative_current_task("T-Wave", "task3")
+
+        self.assertEqual(client.publish_cached_heartbeats(), 0)
+        self.assertEqual(published, [])
+        self.assertEqual(client.runtime_events[-1]["event"], "current_task_conflict")
 
 
 if __name__ == "__main__":

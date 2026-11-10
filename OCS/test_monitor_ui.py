@@ -8,6 +8,25 @@ from vehicle_link import heartbeat_envelope
 
 
 class MonitorStateTests(unittest.TestCase):
+    @staticmethod
+    def uav_raw(latitude, altitude):
+        return json.dumps({
+            "vehicle_id": "UAV1", "vehicle_type": "TYPE_UAV", "state": "STATE_AUTO",
+            "flight_phase": "FLIGHT_PHASE_AIRBORNE",
+            "position": {"latitude": latitude, "longitude": 103.8555},
+            "altitude_hae_m": altitude, "spd_mps": 0, "heading_deg": 0,
+        })
+
+    @staticmethod
+    def add_fence(state):
+        state.note_rbc_declaration(team_id="TONG", seq=7, ceiling=40.0, geofence=[
+            {"latitude": 1.2800, "longitude": 103.8550},
+            {"latitude": 1.2800, "longitude": 103.8560},
+            {"latitude": 1.2810, "longitude": 103.8560},
+            {"latitude": 1.2810, "longitude": 103.8550},
+            {"latitude": 1.2800, "longitude": 103.8550},
+        ])
+
     def heartbeat(self, vehicle_id="T-Wave", sent_at=None):
         sent_at = sent_at or int(time.time() * 1000)
         return {
@@ -105,6 +124,32 @@ class MonitorStateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fault"):
             state.note_fsm_fault("[]")
         self.assertIsNone(state.snapshot()["fsm_fault"])
+
+    def test_fence_alarm_latches_through_stale_and_clears_after_two_seconds_inside(self):
+        state = MonitorState(stale_after_s=0.1)
+        self.add_fence(state)
+        state.note_uav_status(self.uav_raw(1.2820, 55), source_vehicle_id="UAV1")
+        first = state.snapshot()
+        self.assertEqual(first["uav_fence_watch"]["level"], "ALARM")
+        self.assertTrue(first["uav_fence_alert"]["active"])
+        first_distance = first["uav_fence_alert"]["last_confirmed_alarm"]["horizontal_clearance_m"]
+        # A newer breach refreshes the latched measurement instead of dismissing it.
+        state.note_uav_status(self.uav_raw(1.2830, 56), source_vehicle_id="UAV1")
+        self.assertNotEqual(state.snapshot()["uav_fence_alert"]["last_confirmed_alarm"]["horizontal_clearance_m"], first_distance)
+        state.uav_status_received_monotonic -= 1.0
+        stale = state.snapshot()
+        self.assertEqual(stale["uav_fence_watch"]["level"], "STALE")
+        self.assertEqual(stale["uav_fence_alert"]["state"], "STALE_AFTER_ALARM")
+        self.assertTrue(stale["uav_fence_alert"]["active"])
+        # One valid INSIDE sample starts recovery but cannot clear the alert.
+        state.note_uav_status(self.uav_raw(1.2805, 20), source_vehicle_id="UAV1")
+        self.assertTrue(state.snapshot()["uav_fence_alert"]["active"])
+        state._uav_fence_recovery_started_monotonic -= 2.1
+        state.note_uav_status(self.uav_raw(1.2805, 20), source_vehicle_id="UAV1")
+        recovered = state.snapshot()
+        self.assertEqual(recovered["uav_fence_watch"]["level"], "INSIDE")
+        self.assertFalse(recovered["uav_fence_alert"]["active"])
+        self.assertIsNotNone(recovered["last_uav_fence_alarm"])
 
 
 if __name__ == "__main__":

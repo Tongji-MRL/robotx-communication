@@ -50,6 +50,17 @@ class GeofenceAutoPlannerTests(unittest.TestCase):
         else:
             self.assertEqual(ring[0], ring[-1])
             validate_geofence_within_course(COURSE, ring, TRANSIT)
+
+    def test_missing_transit_uses_only_received_course(self):
+        try:
+            course_only = calculate_geofence_from_course_union(COURSE, (), margin_m=1.0)
+            with_transit = calculate_geofence_from_course_union(COURSE, TRANSIT, margin_m=1.0)
+        except RuntimeError as exc:
+            self.assertIn("Shapely/GEOS", str(exc))
+            return
+        validate_geofence_within_course(COURSE, course_only)
+        self.assertLess(max(lon for _, lon in course_only), min(lon for _, lon in TRANSIT_ONLY))
+        self.assertGreater(max(lon for _, lon in with_transit), max(lon for _, lon in course_only))
     def test_generated_fence_is_closed_and_inside_course(self):
         ring = calculate_geofence_from_course(COURSE, margin_m=2.0)
         self.assertEqual(len(ring), 13)
@@ -118,7 +129,7 @@ class GeofenceAutoPlannerTests(unittest.TestCase):
         self.assertEqual(original.course_id, "BENCH")
         ocs.publish_run_declaration(
             ["T-Wave", "T-Sky"],
-            uav_geofence_mode="auto_course", uav_geofence_margin_m=2,
+            uav_geofence_mode="auto_course", uav_geofence_margin_m=1,
             uav_geofence_max_altitude_hae_m=40, uav_geofence_altitude_limit_hae_m=50,
             uav_pilot_callsign="BENCH-PILOT",
         )
@@ -128,6 +139,11 @@ class GeofenceAutoPlannerTests(unittest.TestCase):
         self.assertEqual(payload.team_id, "TONG")
         self.assertEqual(payload.run_declaration.uav_geofence_max_altitude_hae_m, 40)
         self.assertEqual(payload.run_declaration.uav_geofence[0], payload.run_declaration.uav_geofence[-1])
+        # auto_course must never widen into the supplied transit-only area.
+        self.assertLess(
+            max(point.longitude for point in payload.run_declaration.uav_geofence),
+            min(longitude for _, longitude in TRANSIT_ONLY),
+        )
         with self.assertRaisesRegex(ValueError, "outside Course|leaves Course"):
             ocs.publish_run_declaration(
                 ["T-Sky"], uav_geofence=OUTSIDE,

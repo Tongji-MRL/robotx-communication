@@ -1,8 +1,7 @@
-"""Frozen, protobuf-free Course configuration contract helpers.
+"""冻结的 Course 配置合约辅助函数。
 
-This module deliberately has no MQTT or ROS dependency so the same validation
-is used by the OCS and the Ubuntu bridge and can be tested on Windows.
-"""
+负责官方 Course 进入内部系统前的纯数据校验与指纹；无 MQTT/ROS2 依赖，不发送消息，
+可在 Windows 离线测试。"""
 
 from __future__ import annotations
 

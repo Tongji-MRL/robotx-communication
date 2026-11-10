@@ -362,11 +362,35 @@ class OcsClientTests(unittest.TestCase):
         gateway._pending_run_starts = []
         gateway._published_run_starts = []
         gateway.flush_commands()
-        now[0] = 16.0
+        now[0] = 6.0
         gateway.ocs.drain_internal_actions = lambda: []
         gateway.flush_commands()
         self.assertEqual(gateway.pending_control_actions[-1]["state"], "BLOCKED_RUNSTART_TIMEOUT")
         self.assertEqual(gateway.startup_state, "BLOCKED")
+
+    def test_uav_only_run_start_never_uses_twave_fsm_route_without_orin_contract(self) -> None:
+        action = {"kind": "internal_command", "vehicle_id": "T-Wave", "command": "RUN_START",
+                  "run_id": 42, "command_seq": 1, "course_fingerprint": "current"}
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = types.SimpleNamespace(
+            mission_coordinator="T-Wave", drain_internal_actions=lambda: [action],
+            course_fingerprint="current", is_current_course_ready=lambda *_args: True,
+        )
+        gateway.ros2 = types.SimpleNamespace(available=True, publish_course=lambda _payload: True,
+                                             publish_action=lambda _action: self.fail("must not publish"))
+        gateway._start_lock = threading.RLock()
+        gateway._clock = time.monotonic
+        gateway.startup_state = "COURSE_READY"
+        gateway.startup_reason = "test"
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = "current"
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+        from operation_mode import VehicleMode
+        gateway.vehicle_mode = VehicleMode.UAV_ONLY
+        gateway.flush_commands()
+        self.assertEqual(gateway.pending_control_actions[-1]["state"], "BLOCKED_UAV_TASK_RECEIVER_UNAVAILABLE")
 
     def test_vehicle_task_report_is_converted_only_when_official_report_is_present(self) -> None:
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])
@@ -580,7 +604,7 @@ class OcsClientTests(unittest.TestCase):
             "uav_registration": "CAAS-CACHED-001",
         }, "sky-cached-registration"))
         self.client.accept_vehicle_envelope(heartbeat("T-Wave", {
-            **common, "vehicle_type": "usv",
+            **common, "vehicle_type": "usv", "current_task": "TASK_NONE",
         }, "wave-no-registration"))
 
         self.assertEqual(self.client.publish_cached_heartbeats(), 2)
