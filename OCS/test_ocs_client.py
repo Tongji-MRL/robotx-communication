@@ -7,6 +7,7 @@ import unittest
 import ocs_client
 from course_config import fingerprint, make_payload
 from ocs_gateway import OcsGateway, Ros2MissionLink
+from operation_mode import VehicleMode
 from robotx import rx_commands_pb2, rx_common_pb2, rx_course_pb2, rx_reports_pb2, rx_requests_pb2
 
 
@@ -255,6 +256,40 @@ class OcsClientTests(unittest.TestCase):
         gateway.flush_commands()
         self.assertEqual(events, [("course", course_action["payload"])])
         self.assertEqual(gateway.pending_control_actions[0]["state"], "BLOCKED_COURSE_READY_ACK")
+
+    def test_usv_only_republishes_current_course_for_restarted_task_node(self) -> None:
+        """A volatile Orin Course subscription must recover after node restart."""
+        now = [10.0]
+        course_payload = make_payload(course_id="RX2026-A", pinger_freq_hz=27000,
+                                      corners=[(1, 2), (1, 3), (2, 3), (1, 2)], source_sent_at=None)
+        course_fingerprint = fingerprint(course_payload)
+        republishes = []
+        gateway = OcsGateway.__new__(OcsGateway)
+        gateway.ocs = types.SimpleNamespace(
+            mission_coordinator="T-Wave", course_fingerprint=course_fingerprint,
+            drain_internal_actions=lambda: [],
+        )
+        gateway.ros2 = types.SimpleNamespace(
+            available=True,
+            republish_course=lambda: republishes.append("course") or True,
+        )
+        gateway._start_lock = threading.RLock()
+        gateway._clock = lambda: now[0]
+        gateway.vehicle_mode = VehicleMode.USV_ONLY
+        gateway.pending_course = None
+        gateway.course_published_fingerprint = course_fingerprint
+        gateway._next_usv_course_republish_at = 0.0
+        gateway.pending_control_actions = []
+        gateway._pending_run_starts = []
+        gateway._published_run_starts = []
+
+        gateway.flush_commands()
+        self.assertEqual(republishes, ["course"])
+        gateway.flush_commands()
+        self.assertEqual(republishes, ["course"])
+        now[0] += 1.0
+        gateway.flush_commands()
+        self.assertEqual(republishes, ["course", "course"])
 
     def test_matching_fsm_course_ack_releases_run_start_once(self) -> None:
         self.client.publish_run_declaration(["T-Sky", "T-Wave"])

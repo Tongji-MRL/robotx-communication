@@ -1,6 +1,8 @@
 """Offline OCS/FSM contract tests; no ROS/DDS, MQTT broker or hardware needed."""
 import unittest
-from fsm_message_adapter import build_run_start, build_task4, build_usv_only_run_start
+from fsm_message_adapter import (
+    build_run_start, build_task4, build_usv_only_run_start, build_usv_only_task4,
+)
 
 
 class FsmInterfaceAlignmentTests(unittest.TestCase):
@@ -39,6 +41,24 @@ class FsmInterfaceAlignmentTests(unittest.TestCase):
         self.assertEqual(message["vehicle"], "uav")
         self.assertEqual(message["command"]["type"], "ASSISTANCE_REQUEST")
         self.assertEqual(message["command"]["command_seq"], 9)
+
+    def test_usv_only_task4_matches_declared_node_envelope(self):
+        assistance = build_usv_only_task4({
+            "command": "TASK4_ASSISTANCE", "run_id": 42, "command_seq": 9,
+            "parameters": {"official_command_seq": 9, "vehicle_type": 1,
+                           "position": {"latitude": 1.28, "longitude": 103.85}},
+        })
+        self.assertEqual(assistance, {
+            "vehicle": "usv", "task": "TASK4", "progress": None, "error": None,
+            "command": {"type": "ASSISTANCE_REQUEST", "command_seq": 9,
+                        "position": {"latitude": 1.28, "longitude": 103.85}},
+        })
+        readiness = build_usv_only_task4({
+            "command": "TASK4_READINESS_CONFIRM", "run_id": 42, "command_seq": 21,
+            "parameters": {"vehicle": "usv", "original_command_seq": 9,
+                           "report_seq": 14},
+        })
+        self.assertEqual(readiness["command"], {"type": "READINESS_CONFIRM", "report_seq": 14})
 
     def test_assistance_must_have_correlated_seq_and_position(self):
         base = {"command": "TASK4_ASSISTANCE", "run_id": 42, "command_seq": 9,

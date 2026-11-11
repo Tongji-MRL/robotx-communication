@@ -1,5 +1,6 @@
 import unittest
 import time
+from unittest.mock import patch
 
 from heartbeat_cache import HeartbeatCache, HeartbeatRejected
 from ros2_telemetry import Ros2TelemetryAdapter
@@ -37,11 +38,16 @@ class RealtimeHeartbeatTests(unittest.TestCase):
         self.cache.accept(heartbeat("T-Sky", now=self.now, message_id="sky-2"), active_run_id=42)
 
     def test_ignores_source_timestamp_but_rejects_other_invalid_data(self):
-        self.cache.accept(heartbeat("T-Wave", now=self.now - 4000, message_id="old"), active_run_id=42)
-        self.cache.accept(heartbeat("T-Sky", now=self.now + 4_000_000, message_id="future"), active_run_id=42)
+        with patch("builtins.print") as warn:
+            self.cache.accept(heartbeat("T-Wave", now=self.now - 4000, message_id="old"), active_run_id=42)
+            self.cache.accept(heartbeat("T-Sky", now=self.now + 4_000_000, message_id="future"), active_run_id=42)
+        self.assertEqual(warn.call_count, 2)
+        self.assertIn("[WARN]", warn.call_args_list[0].args[0])
         missing_timestamp = heartbeat("T-Wave", message_id="no-timestamp")
         del missing_timestamp["sent_at_unix_ms"]
-        self.cache.accept(missing_timestamp, active_run_id=42)
+        with patch("builtins.print") as warn:
+            self.cache.accept(missing_timestamp, active_run_id=42)
+        self.assertIn("no integer source timestamp", warn.call_args.args[0])
         self.now += 60_000
         self.assertIsNotNone(self.cache.valid("T-Wave", active_run_id=42))
         with self.assertRaises(HeartbeatRejected):

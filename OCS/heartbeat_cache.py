@@ -7,6 +7,7 @@ either complete and valid, or unavailable for official reporting.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
@@ -24,6 +25,7 @@ VALID_USV_CURRENT_TASKS = {
     "TASK_COORDINATED_LOGISTICS",
     "TASK_DYNAMIC_INCIDENT",
 }
+TIMESTAMP_WARNING_SKEW_MS = 3_000
 
 
 class HeartbeatRejected(ValueError):
@@ -49,7 +51,8 @@ timestamp at publish time.
     def __init__(self, *, max_age_seconds: float | None = None, now_ms=None, monotonic=None) -> None:
         # Compatibility-only parameters.  Timestamp age gating was removed for
         # the USV internal heartbeat path.
-        del max_age_seconds, now_ms
+        del max_age_seconds
+        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
         self.monotonic = monotonic or (lambda: 0.0)
         self._entries: dict[str, CachedHeartbeat] = {}
         self._seen_ids: set[str] = set()
@@ -69,12 +72,26 @@ timestamp at publish time.
         if active_run_id is not None and run_id != active_run_id:
             raise HeartbeatRejected("heartbeat is not for the active run")
         sent_at = envelope.get("sent_at_unix_ms")
+        self._warn_timestamp(vehicle_id, sent_at)
         payload = dict(envelope.get("payload") or {})
         self._validate_payload(vehicle_id, payload)
         self._seen_ids.add(message_id)
         entry = CachedHeartbeat(vehicle_id, payload, sent_at, self.monotonic(), run_id)
         self._entries[vehicle_id] = entry
         return entry
+
+    def _warn_timestamp(self, vehicle_id: str, sent_at: Any) -> None:
+        """Report source-clock anomalies without changing heartbeat eligibility."""
+        if not isinstance(sent_at, int) or isinstance(sent_at, bool):
+            print(f"[WARN] heartbeat vehicle_id={vehicle_id!r} has no integer source timestamp; accepted")
+            return
+        skew_ms = self.now_ms() - sent_at
+        if abs(skew_ms) > TIMESTAMP_WARNING_SKEW_MS:
+            direction = "past" if skew_ms > 0 else "future"
+            print(
+                f"[WARN] heartbeat vehicle_id={vehicle_id!r} source timestamp is "
+                f"{abs(skew_ms)} ms in the {direction}; accepted"
+            )
 
     def valid(self, vehicle_id: str, *, active_run_id: int | None) -> CachedHeartbeat | None:
         entry = self._entries.get(vehicle_id)

@@ -28,7 +28,9 @@ from ocs_client import (
     load_config,
 )
 from vehicle_link import VehicleLink
-from fsm_message_adapter import build_run_start, build_task4, build_usv_only_run_start
+from fsm_message_adapter import (
+    build_run_start, build_task4, build_usv_only_run_start, build_usv_only_task4,
+)
 from course_config import fingerprint
 from uav_status import normalize_uav_status
 from operation_mode import VehicleMode, select_declaration
@@ -56,6 +58,10 @@ MISSION_TOPICS = {
     "uav_geofence_readback": UAV_GEOFENCE_READBACK_TOPIC,
 }
 RUNSTART_PENDING_TIMEOUT_S = 5.0
+# The Orin task-node Course subscription is VOLATILE.  Re-publish the current
+# immutable Course while USV-only is active so a task-node restart can recover
+# its configuration without changing the FSM or replaying an official RunStart.
+USV_COURSE_REPUBLISH_INTERVAL_S = 1.0
 GEOFENCE_READBACK_TIMEOUT_S = 10.0
 GEOFENCE_ALTITUDE_TOLERANCE_M = 0.01
 
@@ -219,7 +225,8 @@ class Ros2MissionLink:
                 payload, ensure_ascii=False, separators=(",", ":")
             )))
             return True, None
-        task4 = self._task4_payload(action)
+        task4 = (build_usv_only_task4(action) if self._usv_only_run_start
+                 else self._task4_payload(action))
         if task4 is None:
             return False, f"FSM has no supported ROS2 Task4 mapping for {command}"
         if self._node.task4_pub.get_subscription_count() == 0:
@@ -396,6 +403,7 @@ class OcsGateway:
         self.startup_reason = "waiting for valid retained RxCourse"
         self.pending_course: dict | None = None
         self.course_published_fingerprint: str | None = None
+        self._next_usv_course_republish_at = 0.0
         self.uav_geofence_published_fingerprint: str | None = None
         self._expected_uav_geofence: tuple[tuple[float, float], ...] | None = None
         self._expected_uav_geofence_max_altitude_hae_m: float | None = None
@@ -685,8 +693,13 @@ class OcsGateway:
                 if self.ros2.publish_course(self.pending_course):
                     self.course_published_fingerprint = fingerprint(self.pending_course)
                     self.pending_course = None
+                    if getattr(self, "vehicle_mode", VehicleMode.DUAL_VEHICLE) is VehicleMode.USV_ONLY:
+                        self._next_usv_course_republish_at = (
+                            self._clock() + USV_COURSE_REPUBLISH_INTERVAL_S
+                        )
                 elif self.ros2.available:
                     print("[ROS2] Course pending: no matching FSM subscriber")
+            self._republish_usv_course_if_due()
             for action in controls:
                 if action.get("command") == "RUN_START":
                     if getattr(self, "vehicle_mode", VehicleMode.DUAL_VEHICLE) is VehicleMode.USV_ONLY:
@@ -720,6 +733,25 @@ class OcsGateway:
                     else:
                         self.pending_control_actions.append({"action": action, "state": "SUBMITTED_UNCONFIRMED", "reason": None})
             self._release_pending_run_starts()
+
+    def _republish_usv_course_if_due(self) -> None:
+        """Replay only the current Course for a restarted USV task-node.
+
+        This is deliberately limited to Course.  A validated official RunStart
+        remains one-shot and is never replayed after a task-node restart.
+        """
+        if getattr(self, "vehicle_mode", VehicleMode.DUAL_VEHICLE) is not VehicleMode.USV_ONLY:
+            return
+        current_fingerprint = self.ocs.course_fingerprint
+        if (current_fingerprint is None or self.pending_course is not None or
+                self.course_published_fingerprint != current_fingerprint):
+            return
+        now = self._clock()
+        if now < getattr(self, "_next_usv_course_republish_at", 0.0):
+            return
+        republish = getattr(self.ros2, "republish_course", None)
+        if callable(republish) and republish():
+            self._next_usv_course_republish_at = now + USV_COURSE_REPUBLISH_INTERVAL_S
 
     def _release_pending_run_starts(self) -> None:
         """Release only matching, fresh RunStart records after an FSM Course ACK."""

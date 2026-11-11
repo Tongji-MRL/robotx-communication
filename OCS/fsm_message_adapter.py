@@ -60,6 +60,42 @@ def build_usv_only_run_start(action: Mapping[str, Any]) -> dict[str, str] | None
     return {"command": "begin"}
 
 
+def build_usv_only_task4(action: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Build the established USV task-node envelope for official Task 4 input.
+
+    Validation and official correlation are first performed by ``build_task4``.
+    The task-node interface deliberately receives only its declared envelope;
+    it does not need OCS-specific schema/run correlation fields to decide the
+    task flow.
+    """
+    mapped = build_task4(action)
+    if mapped is None:
+        return None
+    command = mapped["command"]
+    if command["type"] == "ASSISTANCE_REQUEST":
+        node_command = {
+            "type": "ASSISTANCE_REQUEST",
+            "command_seq": command["command_seq"],
+            "position": command["position"],
+        }
+    elif command["type"] == "READINESS_CONFIRM":
+        node_command = {
+            "type": "READINESS_CONFIRM",
+            "report_seq": command["report_seq"],
+        }
+    else:
+        # The interface document does not define a task-node payload for this
+        # OCS-originated bookkeeping event. Keep it out of the new contract.
+        return None
+    return {
+        "vehicle": mapped["vehicle"],
+        "task": "TASK4",
+        "progress": None,
+        "error": None,
+        "command": node_command,
+    }
+
+
 def build_task4(action: Mapping[str, Any]) -> dict[str, Any] | None:
     """Supported Task4 transport messages only; never decide safety policy.
 

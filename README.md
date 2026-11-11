@@ -64,6 +64,16 @@ python -u .\OCS\ocs_gateway.py `
 Gateway 会连接官方与内部 Broker，等待官方 Course，然后只为 `T-Wave` 发布
 RunDeclaration。默认 `--duration 0`，表示持续运行。
 
+启动 MAVROS 前必须先使用局域网授时源完成同步。仓库提供的启动脚本只使用你指定的
+局域网 NTP 服务器，不会回退到互联网；自检未通过时不会启动 MAVROS：
+
+```bash
+cd ~/robotx_ws
+ROBOTX_WORKSPACE=~/robotx_ws \
+  /path/to/robotx-rc-lab/scripts/start_mavros_with_time_sync.sh \
+  --ntp-server <局域网_NTP_IP>
+```
+
 ## Orin 接口
 
 ### 心跳
