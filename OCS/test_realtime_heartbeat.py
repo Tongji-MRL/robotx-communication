@@ -36,9 +36,14 @@ class RealtimeHeartbeatTests(unittest.TestCase):
         self.cache.accept(heartbeat("T-Wave", now=self.now, message_id="wave-2"), active_run_id=42)
         self.cache.accept(heartbeat("T-Sky", now=self.now, message_id="sky-2"), active_run_id=42)
 
-    def test_rejects_stale_old_run_duplicate_and_invalid_location(self):
-        with self.assertRaises(HeartbeatRejected):
-            self.cache.accept(heartbeat("T-Wave", now=self.now - 4000), active_run_id=42)
+    def test_ignores_source_timestamp_but_rejects_other_invalid_data(self):
+        self.cache.accept(heartbeat("T-Wave", now=self.now - 4000, message_id="old"), active_run_id=42)
+        self.cache.accept(heartbeat("T-Sky", now=self.now + 4_000_000, message_id="future"), active_run_id=42)
+        missing_timestamp = heartbeat("T-Wave", message_id="no-timestamp")
+        del missing_timestamp["sent_at_unix_ms"]
+        self.cache.accept(missing_timestamp, active_run_id=42)
+        self.now += 60_000
+        self.assertIsNotNone(self.cache.valid("T-Wave", active_run_id=42))
         with self.assertRaises(HeartbeatRejected):
             self.cache.accept(heartbeat("T-Wave", run_id=41), active_run_id=42)
         msg = heartbeat("T-Wave", message_id="once")

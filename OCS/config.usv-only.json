@@ -1,0 +1,30 @@
+{
+  "team_id": "TONG",
+  "mission_coordinator": "T-Wave",
+  "internal_broker": {
+    "host": "127.0.0.1",
+    "port": 1883,
+    "purpose": "T-Wave internal MQTT state and heartbeat only"
+  },
+  "robocommand": {
+    "host": "TBD_FROM_RBC_CONNECTION_INSTRUCTIONS",
+    "port": 1883,
+    "interface_mode": "DHCP"
+  },
+  "vehicles": {
+    "usv": {
+      "vehicle_id": "T-Wave",
+      "internal_label": "T-Wave",
+      "orin_ip": "TBD_USV_ORIN_IP"
+    }
+  },
+  "run_declaration": {
+    "task_tiers": {
+      "task1": "core",
+      "task2": "none",
+      "task3": "core",
+      "task4": "advanced"
+    },
+    "note": "USV-only profile. UAV RunDeclaration fields are intentionally omitted; ocs_gateway --vehicle-mode usv_only selects T-Wave only."
+  }
+}

@@ -7,7 +7,6 @@ either complete and valid, or unavailable for official reporting.
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
@@ -35,22 +34,23 @@ class HeartbeatRejected(ValueError):
 class CachedHeartbeat:
     vehicle_id: str
     payload: dict[str, Any]
-    sent_at_unix_ms: int
+    sent_at_unix_ms: Any
     received_monotonic: float
     run_id: int | None
 
 
 class HeartbeatCache:
-    """只缓存完整、未过期且属于当前 run 的真实车辆心跳。
+    """Cache complete heartbeats for the current run.
 
-OcsClient 发布官方 Heartbeat 前读取本缓存；本类不联网、不补造字段、不发布消息。
+The source timestamp is retained as received metadata but never gates cache
+acceptance, ordering, binding, or publication.  OCS emits the official report
+timestamp at publish time.
 """
-    def __init__(self, *, max_age_seconds: float = 3.0, now_ms=None, monotonic=None) -> None:
-        if max_age_seconds <= 0:
-            raise ValueError("max_age_seconds must be positive")
-        self.max_age_ms = int(max_age_seconds * 1000)
-        self.now_ms = now_ms or (lambda: int(time.time() * 1000))
-        self.monotonic = monotonic or time.monotonic
+    def __init__(self, *, max_age_seconds: float | None = None, now_ms=None, monotonic=None) -> None:
+        # Compatibility-only parameters.  Timestamp age gating was removed for
+        # the USV internal heartbeat path.
+        del max_age_seconds, now_ms
+        self.monotonic = monotonic or (lambda: 0.0)
         self._entries: dict[str, CachedHeartbeat] = {}
         self._seen_ids: set[str] = set()
 
@@ -69,18 +69,8 @@ OcsClient 发布官方 Heartbeat 前读取本缓存；本类不联网、不补�
         if active_run_id is not None and run_id != active_run_id:
             raise HeartbeatRejected("heartbeat is not for the active run")
         sent_at = envelope.get("sent_at_unix_ms")
-        if not isinstance(sent_at, int) or isinstance(sent_at, bool):
-            raise HeartbeatRejected("invalid heartbeat timestamp")
-        skew = self.now_ms() - sent_at
-        if skew > self.max_age_ms:
-            raise HeartbeatRejected("stale heartbeat")
-        if skew < -self.max_age_ms:
-            raise HeartbeatRejected("heartbeat timestamp is too far in the future")
         payload = dict(envelope.get("payload") or {})
         self._validate_payload(vehicle_id, payload)
-        old = self._entries.get(vehicle_id)
-        if old is not None and sent_at <= old.sent_at_unix_ms:
-            raise HeartbeatRejected("out-of-order heartbeat")
         self._seen_ids.add(message_id)
         entry = CachedHeartbeat(vehicle_id, payload, sent_at, self.monotonic(), run_id)
         self._entries[vehicle_id] = entry
@@ -89,8 +79,6 @@ OcsClient 发布官方 Heartbeat 前读取本缓存；本类不联网、不补�
     def valid(self, vehicle_id: str, *, active_run_id: int | None) -> CachedHeartbeat | None:
         entry = self._entries.get(vehicle_id)
         if entry is None or (active_run_id is not None and entry.run_id != active_run_id):
-            return None
-        if self.now_ms() - entry.sent_at_unix_ms > self.max_age_ms:
             return None
         return entry
 
@@ -104,7 +92,7 @@ OcsClient 发布官方 Heartbeat 前读取本缓存；本类不联网、不补�
             raise HeartbeatRejected("active run_id must be a positive integer")
         bound = 0
         for vehicle_id, entry in tuple(self._entries.items()):
-            if entry.run_id is None and self.now_ms() - entry.sent_at_unix_ms <= self.max_age_ms:
+            if entry.run_id is None:
                 self._entries[vehicle_id] = replace(entry, run_id=run_id)
                 bound += 1
         return bound

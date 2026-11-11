@@ -1,6 +1,6 @@
 """Offline OCS/FSM contract tests; no ROS/DDS, MQTT broker or hardware needed."""
 import unittest
-from fsm_message_adapter import build_run_start, build_task4
+from fsm_message_adapter import build_run_start, build_task4, build_usv_only_run_start
 
 
 class FsmInterfaceAlignmentTests(unittest.TestCase):
@@ -22,6 +22,11 @@ class FsmInterfaceAlignmentTests(unittest.TestCase):
             {"command": "PING", "run_id": 42, "command_seq": 7},
         ):
             self.assertIsNone(build_run_start(action), action)
+
+    def test_usv_only_runstart_keeps_oc_validation_but_emits_orin_contract(self):
+        action = {"command": "RUN_START", "run_id": 42, "command_seq": 7}
+        self.assertEqual(build_usv_only_run_start(action), {"command": "begin"})
+        self.assertIsNone(build_usv_only_run_start({"command": "RUN_START", "run_id": 0, "command_seq": 7}))
 
     def test_assistance_matches_fsm_task4_guard_schema(self):
         message = build_task4({

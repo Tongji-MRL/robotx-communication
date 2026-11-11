@@ -375,7 +375,7 @@ class MonitorState:
 class MqttMonitor:
     def __init__(self, state: MonitorState, host: str, port: int, username: str | None = None,
                  password: str | None = None, enable_lab_commands: bool = False,
-                 uav_source_vehicle_id: str | None = None) -> None:
+                 uav_source_vehicle_id: str | None = None, usv_only: bool = True) -> None:
         self.state = state
         self.host = host
         self.port = port
@@ -383,6 +383,9 @@ class MqttMonitor:
         # avoids silently accepting legacy command-line invocations.
         self.enable_lab_commands = False
         self.uav_source_vehicle_id = uav_source_vehicle_id
+        self.heartbeat_topics = (
+            {"/tongji_mrl/twave/heartbeat": "T-Wave"} if usv_only else HEARTBEAT_TOPICS
+        )
         self.client = None
         if mqtt is not None:
             self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -446,7 +449,7 @@ class MqttMonitor:
         if reason_code != 0:
             self.state.broker_event(connected=False, host=self.host, port=self.port, event=f"连接失败: {reason_code}")
             return
-        for mqtt_topic in HEARTBEAT_TOPICS:
+        for mqtt_topic in self.heartbeat_topics:
             client.subscribe(mqtt_topic, qos=1)
         if self.uav_source_vehicle_id:
             client.subscribe(UAV_STATUS_MQTT_TOPIC, qos=1)
@@ -462,7 +465,8 @@ class MqttMonitor:
                     raise ValueError("UAV source vehicle_id mapping is not configured")
                 self.state.note_uav_status(message.payload, source_vehicle_id=self.uav_source_vehicle_id)
                 return
-            envelope = heartbeat_envelope(message.topic, message.payload)
+            envelope = heartbeat_envelope(message.topic, message.payload,
+                                          heartbeat_topics=self.heartbeat_topics)
             self.state.note_message(message.topic, envelope)
         except Exception as exc:
             self.state.note_error(f"忽略非法消息 {message.topic}: {exc}")
@@ -680,6 +684,11 @@ def main() -> int:
     parser.add_argument("--password")
     parser.add_argument("--stale-after", type=float, default=3.0)
     parser.add_argument("--uav-source-vehicle-id", help="UAV JSON source vehicle_id for direct ROS2 and MQTT observation")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--usv-only", dest="usv_only", action="store_true", default=True,
+                            help="default: observe only T-Wave MQTT/ROS2 paths")
+    mode_group.add_argument("--dual-vehicle", dest="usv_only", action="store_false",
+                            help="explicitly enable retained UAV monitor subscriptions")
     parser.add_argument("--rbc-watch-broker", help="local loopback RBC broker for read-only Course/RunDeclaration observation")
     parser.add_argument("--rbc-watch-port", type=int, default=1883)
     parser.add_argument("--rbc-team-id", default="TONG")
@@ -689,9 +698,11 @@ def main() -> int:
         parser.error("--rbc-watch-broker must be a local loopback address")
 
     state = MonitorState(stale_after_s=args.stale_after)
+    if args.usv_only and args.uav_source_vehicle_id:
+        parser.error("--usv-only cannot be combined with --uav-source-vehicle-id")
     monitor = MqttMonitor(state, args.broker, args.port, args.username, args.password,
-                          args.enable_lab_commands, args.uav_source_vehicle_id)
-    ros2_monitor = Ros2Monitor(state, args.uav_source_vehicle_id)
+                          args.enable_lab_commands, args.uav_source_vehicle_id, args.usv_only)
+    ros2_monitor = Ros2Monitor(state, None if args.usv_only else args.uav_source_vehicle_id)
     rbc_observer = (RbcGeofenceObserver(state, host=args.rbc_watch_broker,
                                          port=args.rbc_watch_port, team_id=args.rbc_team_id)
                     if args.rbc_watch_broker else None)

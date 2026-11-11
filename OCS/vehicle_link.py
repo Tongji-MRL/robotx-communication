@@ -51,7 +51,13 @@ HEARTBEAT_TOPICS = {
 UAV_STATUS_TOPIC = "/tongji_mrl/tsky/uav_status"
 
 
-def heartbeat_envelope(mqtt_topic: str, raw: bytes | str, *, active_run_id: int | None = None) -> dict[str, Any]:
+def heartbeat_envelope(
+    mqtt_topic: str,
+    raw: bytes | str,
+    *,
+    active_run_id: int | None = None,
+    heartbeat_topics: dict[str, str] | None = None,
+) -> dict[str, Any]:
     """Adapt a raw vehicle heartbeat only at the MQTT receive boundary.
 
     No vehicle telemetry is invented.  A timestamp is mandatory so the
@@ -59,7 +65,7 @@ def heartbeat_envelope(mqtt_topic: str, raw: bytes | str, *, active_run_id: int 
     message id, a deterministic digest of its unchanged JSON is used solely
     for duplicate detection.
     """
-    vehicle_id = HEARTBEAT_TOPICS.get(mqtt_topic)
+    vehicle_id = (heartbeat_topics or HEARTBEAT_TOPICS).get(mqtt_topic)
     if vehicle_id is None:
         raise ValueError(f"unexpected production heartbeat topic: {mqtt_topic}")
     try:
@@ -74,9 +80,9 @@ def heartbeat_envelope(mqtt_topic: str, raw: bytes | str, *, active_run_id: int 
         if payload.get("vehicle_id") != vehicle_id:
             raise ValueError("heartbeat vehicle_id does not match MQTT topic")
         return payload
+    # Source timestamps are forwarded as diagnostic metadata only.  They do
+    # not participate in OCS heartbeat acceptance or freshness decisions.
     sent_at = payload.get("sent_at_unix_ms", payload.get("timestamp_unix_ms"))
-    if not isinstance(sent_at, int) or isinstance(sent_at, bool):
-        raise ValueError("raw heartbeat requires integer sent_at_unix_ms or timestamp_unix_ms")
     message_id = payload.get("message_id")
     if not isinstance(message_id, str) or not message_id:
         canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -110,14 +116,16 @@ class VehicleLink:
         uav_source_vehicle_id: str | None = None,
         uav_vehicle_id: str = "T-Sky",
         uav_registration: str | None = None,
+        heartbeat_topics: dict[str, str] | None = None,
     ) -> None:
         if mqtt is None:
             raise SystemExit("请先安装 paho-mqtt：python -m pip install -r requirements.txt") from _MQTT_IMPORT_ERROR
         self.vehicle_id = vehicle_id
         self.on_message = on_message
         self.command_topic = command_topic or topic("T-Wave", "command")
+        self.heartbeat_topics = dict(heartbeat_topics or HEARTBEAT_TOPICS)
         self.subscription_topics = (
-            (subscription_topic,) if subscription_topic else tuple(HEARTBEAT_TOPICS)
+            (subscription_topic,) if subscription_topic else tuple(self.heartbeat_topics)
         )
         self.on_connect = on_connect
         self.active_run_id = active_run_id or (lambda: None)
@@ -162,7 +170,10 @@ class VehicleLink:
                 ))
                 print("[RxVehicle] UAV status accepted for read-only cache")
                 return
-            value = heartbeat_envelope(message.topic, message.payload, active_run_id=self.active_run_id())
+            value = heartbeat_envelope(
+                message.topic, message.payload, active_run_id=self.active_run_id(),
+                heartbeat_topics=self.heartbeat_topics,
+            )
             print(f"[RxVehicle] heartbeat vehicle={value.get('vehicle_id')} id={value.get('message_id')}")
             if self.on_message is not None:
                 self.on_message(value)

@@ -28,7 +28,7 @@ from ocs_client import (
     load_config,
 )
 from vehicle_link import VehicleLink
-from fsm_message_adapter import build_run_start, build_task4
+from fsm_message_adapter import build_run_start, build_task4, build_usv_only_run_start
 from course_config import fingerprint
 from uav_status import normalize_uav_status
 from operation_mode import VehicleMode, select_declaration
@@ -37,6 +37,10 @@ from uav_geofence import (
     parse_applied_geofence_readback, serialize_geofence,
 )
 
+
+# Keep the library client's historical template separate from the operational
+# gateway default.  An operator must opt in to a UAV-capable profile/mode.
+DEFAULT_GATEWAY_CONFIG = Path(__file__).resolve().with_name("config.usv-only.json")
 
 MISSION_TOPICS = {
     "course": "/tongji_mrl/mission/course_config",
@@ -69,6 +73,8 @@ class Ros2MissionLink:
                  uav_registration: str | None = None, on_uav_geofence_readback=None,
                  uav_status_trusted: bool = False,
                  uav_use_ocs_receipt_for_freshness: bool = False,
+                 enable_uav_geofence: bool = True,
+                 usv_only_run_start: bool = False,
                  offline_test_receiver_token: str | None = None, offline_test_mode: bool = False) -> None:
         self.error: str | None = None
         self.available = False
@@ -78,6 +84,8 @@ class Ros2MissionLink:
         self._course_payload: str | None = None
         self._uav_geofence_readback_subscription = None
         self._uav_geofence_readback_callback = on_uav_geofence_readback
+        self._enable_uav_geofence = enable_uav_geofence
+        self._usv_only_run_start = usv_only_run_start
         self._offline_test_receiver_token = offline_test_receiver_token
         self._offline_test_receiver_ready = False
         self._offline_test_mode = offline_test_mode
@@ -111,8 +119,10 @@ class Ros2MissionLink:
                         lambda msg: self._accept_offline_test_receiver_ready(msg.data), 10,
                     )
                 node_self.task4_pub = node_self.create_publisher(String, MISSION_TOPICS["task4"], 10)
-                node_self.uav_geofence_pub = node_self.create_publisher(
-                    String, MISSION_TOPICS["uav_geofence_apply"], 10)
+                node_self.uav_geofence_pub = (
+                    node_self.create_publisher(String, MISSION_TOPICS["uav_geofence_apply"], 10)
+                    if self._enable_uav_geofence else None
+                )
                 node_self.create_subscription(String, MISSION_TOPICS["status"], lambda msg: self._safe_callback(on_status, msg.data, "status"), 10)
                 node_self.create_subscription(String, MISSION_TOPICS["task_report"], lambda msg: self._safe_callback(on_task_report, msg.data, "task_report"), 10)
                 if on_fault is not None:
@@ -160,7 +170,7 @@ class Ros2MissionLink:
             # geofence publish or a separate ``ros2 topic echo`` process.
             while self.available:
                 self._rclpy.spin_once(self._node, timeout_sec=0.5)
-                if self._uav_geofence_readback_subscription is None:
+                if self._enable_uav_geofence and self._uav_geofence_readback_subscription is None:
                     self._ensure_uav_geofence_readback_subscription()
         except Exception as exc:
             self.error = f"ROS 2 spin failed: {exc}"
@@ -201,7 +211,8 @@ class Ros2MissionLink:
                 return False, "real RunStart publishing is disabled in offline test mode"
             if self._node.run_start_pub.get_subscription_count() == 0:
                 return False, "no matching FSM RunStart subscriber"
-            payload = build_run_start(action)
+            payload = (build_usv_only_run_start(action) if self._usv_only_run_start
+                       else build_run_start(action))
             if payload is None:
                 return False, "RunStart missing valid run_id or official command_seq"
             self._node.run_start_pub.publish(self._string(json.dumps(
@@ -272,6 +283,8 @@ class Ros2MissionLink:
 
         A ROS 2 publish is not treated as FCU write/readback confirmation.
         """
+        if not self._enable_uav_geofence:
+            return False, "UAV geofence transport is disabled by USV-only mode"
         if not self.available or self._node is None:
             return False, self.error or "ROS 2 mission transport is unavailable"
         try:
@@ -284,6 +297,8 @@ class Ros2MissionLink:
 
     def _ensure_uav_geofence_readback_subscription(self) -> str | None:
         """Discover the readback type before subscribing; never guess a type."""
+        if not self._enable_uav_geofence:
+            return "UAV geofence transport is disabled by USV-only mode"
         if getattr(self, "_uav_geofence_readback_subscription", None) is not None:
             return None
         if self._node is None:
@@ -395,13 +410,17 @@ class OcsGateway:
         self.vehicle_mode = VehicleMode(vehicle_mode)
         self.allow_uav_geofence_apply = allow_uav_geofence_apply
         self.offline_test_mode = offline_test_mode
+        uav_io_enabled = self.vehicle_mode is not VehicleMode.USV_ONLY
         self.ros2 = Ros2MissionLink(self._on_fsm_status, self.ocs.accept_fsm_task_report,
-                                    self._on_fsm_fault, self.ocs.accept_uav_status,
+                                    self._on_fsm_fault,
+                                    self.ocs.accept_uav_status if uav_io_enabled else None,
                                     uav_source_vehicle_id=uav_source_vehicle_id,
                                      uav_vehicle_id=uav_vehicle_id, uav_registration=uav_registration,
-                                     on_uav_geofence_readback=self._on_uav_geofence_readback,
+                                     on_uav_geofence_readback=self._on_uav_geofence_readback if uav_io_enabled else None,
                                      uav_status_trusted=uav_status_trusted,
                                      uav_use_ocs_receipt_for_freshness=uav_use_ocs_receipt_for_freshness,
+                                     enable_uav_geofence=uav_io_enabled,
+                                     usv_only_run_start=self.vehicle_mode is VehicleMode.USV_ONLY,
                                      offline_test_receiver_token=offline_test_receiver_token,
                                      offline_test_mode=offline_test_mode)
         self.vehicle_link = VehicleLink(
@@ -412,10 +431,14 @@ class OcsGateway:
             username=internal_username,
             password=internal_password,
             active_run_id=lambda: self.ocs.run_id,
-            on_uav_status=self.ocs.accept_uav_status,
+            on_uav_status=self.ocs.accept_uav_status if uav_io_enabled else None,
             uav_source_vehicle_id=uav_source_vehicle_id,
             uav_vehicle_id=uav_vehicle_id,
             uav_registration=uav_registration,
+            heartbeat_topics=(
+                {"/tongji_mrl/twave/heartbeat": "T-Wave"}
+                if self.vehicle_mode is VehicleMode.USV_ONLY else None
+            ),
         )
 
     def connect(self) -> None:
@@ -666,6 +689,20 @@ class OcsGateway:
                     print("[ROS2] Course pending: no matching FSM subscriber")
             for action in controls:
                 if action.get("command") == "RUN_START":
+                    if getattr(self, "vehicle_mode", VehicleMode.DUAL_VEHICLE) is VehicleMode.USV_ONLY:
+                        sent, reason = self.ros2.publish_action(action)
+                        state = "RUNSTART_FORWARDED" if sent else "BLOCKED_RUNSTART_NOT_PUBLISHED"
+                        record = {
+                            "action": action, "state": state, "reason": reason,
+                            "received_monotonic": self._clock(),
+                        }
+                        self.pending_control_actions.append(record)
+                        self._set_startup_state(
+                            state,
+                            "validated official RunStart forwarded to USV task nodes"
+                            if sent else str(reason),
+                        )
+                        continue
                     record = {
                         "action": action,
                         "state": "BLOCKED_COURSE_READY_ACK",
@@ -760,7 +797,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="OCS official RoboCommand to USV coordinator gateway"
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--config", type=Path, default=DEFAULT_GATEWAY_CONFIG)
     parser.add_argument("--official-broker", help="computer B official broker")
     parser.add_argument("--official-port", type=int)
     parser.add_argument("--internal-broker", help="team internal broker")
@@ -772,8 +809,8 @@ def main() -> int:
     parser.add_argument("--internal-password", help="internal MQTT password")
     parser.add_argument("--uav-source-vehicle-id", help="explicit ROS2 UAV JSON vehicle_id mapping; subscription disabled when omitted")
     parser.add_argument("--vehicle-mode", choices=[mode.value for mode in VehicleMode],
-                        default=VehicleMode.DUAL_VEHICLE.value,
-                        help="fixed RunDeclaration vehicle set; default preserves dual-vehicle behavior")
+                        default=VehicleMode.USV_ONLY.value,
+                        help="fixed RunDeclaration vehicle set; default is isolated T-Wave USV-only")
     parser.add_argument("--duration", type=float, default=0.0, help="0 means continuous")
     parser.add_argument("--ros2-diagnose", action="store_true", help="read-only ROS2 discovery; never connects MQTT")
     parser.add_argument(
@@ -850,6 +887,15 @@ def main() -> int:
     )
     print(f"[Mode] {args.vehicle_mode}; declaration vehicles: {selection.vehicle_ids}")
     uav_config = vehicle_config.get("uav", {})
+    if args.vehicle_mode == VehicleMode.DUAL_VEHICLE.value:
+        required_uav_fields = ("vehicle_id", "source_vehicle_id", "uav_registration")
+        missing = [name for name in required_uav_fields
+                   if not isinstance(uav_config.get(name), str) or not uav_config[name].strip()]
+        if missing:
+            parser.error(
+                "--vehicle-mode dual_vehicle requires complete vehicles.uav configuration: "
+                + ", ".join(missing)
+            )
     uav_is_declared = uav_config.get("vehicle_id") in selection.vehicle_ids
     uav_source_vehicle_id = (args.uav_source_vehicle_id or uav_config.get("source_vehicle_id")) if uav_is_declared else None
     uav_status_trusted = uav_config.get("trusted_status_topic") is True

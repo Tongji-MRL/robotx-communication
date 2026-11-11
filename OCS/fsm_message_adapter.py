@@ -48,6 +48,18 @@ def build_run_start(action: Mapping[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def build_usv_only_run_start(action: Mapping[str, Any]) -> dict[str, str] | None:
+    """Build the deliberately minimal Orin task-node start contract.
+
+    Official run/sequence validation remains in :class:`OcsClient`; this
+    adapter only changes the payload accepted by the USV task-node fan-out.
+    Do not call it before the validated internal RUN_START action exists.
+    """
+    if build_run_start(action) is None:
+        return None
+    return {"command": "begin"}
+
+
 def build_task4(action: Mapping[str, Any]) -> dict[str, Any] | None:
     """Supported Task4 transport messages only; never decide safety policy.
 
